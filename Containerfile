@@ -23,9 +23,6 @@ RUN microdnf update -y && \
 	nodejs \
     && microdnf clean all
 
-# Install Open AI Codex
-RUN npm install -g @openai/codex
-
 # Create a non-root user
 RUN useradd -m -u 1000 appuser
 USER appuser
@@ -33,11 +30,17 @@ USER appuser
 # Working directory inside the container
 WORKDIR /workspace
 
+# Install Open AI Codex
+RUN curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh
+
 # Get Rust
 RUN curl https://sh.rustup.rs -sSf | bash -s -- -y
 
 # Keep local tooling on PATH (cargo + installed binaries)
 ENV PATH="/home/appuser/.cargo/bin:/home/appuser/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+# Add rust analyzer
+RUN rustup component add rust-src
 
 # install Claude Code
 RUN curl -fsSL https://claude.ai/install.sh | bash
