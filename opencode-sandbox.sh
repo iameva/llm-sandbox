@@ -10,7 +10,7 @@ podman run --rm -it \
   -v "$PWD:/workspace:z,rw" \
   -v "$ROOT/opencode:/home/appuser/.config/opencode:z,rw" \
   -v "$ROOT/local-opencode:/home/appuser/.local/share/opencode:z,rw" \
-  --tmpfs /tmp:rw,size=64M \
+  --tmpfs /tmp:rw,size=512M \
   --tmpfs /run:rw,size=16M \
   --network=slirp4netns \
   llm-sandbox \

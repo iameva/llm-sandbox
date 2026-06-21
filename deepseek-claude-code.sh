@@ -39,7 +39,7 @@ podman run --rm -it \
   -e CLAUDE_CODE_SUBAGENT_MODEL="deepseek-v4-flash" \
   -e CLAUDE_CODE_EFFORT_LEVEL="max" \
   -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
-  --tmpfs /tmp:rw,size=64M \
+  --tmpfs /tmp:rw,size=512M \
   --tmpfs /run:rw,size=16M \
   --network=slirp4netns \
   llm-sandbox \
