@@ -9,3 +9,4 @@ cp aider-sandbox.sh ~/.local/bin/,aider-sandbox.sh
 cp pi-sandbox.sh ~/.local/bin/,pi-sandbox.sh
 cp omp-sandbox.sh ~/.local/bin/,omp-sandbox.sh
 
+cp copy-session.sh ~/.local/bin/,copy-session.sh

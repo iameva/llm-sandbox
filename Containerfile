@@ -21,6 +21,7 @@ RUN microdnf update -y && \
 	bubblewrap \
 	tar \
 	nodejs \
+	caddy \
     && microdnf clean all
 
 # Create a non-root user
