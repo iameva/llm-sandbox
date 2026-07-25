@@ -1,5 +1,8 @@
 FROM registry.fedoraproject.org/fedora-minimal:latest
 
+# Create a non-root user
+RUN useradd -m -u 1000 appuser
+
 # Install ONLY what you want available inside the sandbox
 RUN microdnf update -y && \
     microdnf install -y \
@@ -24,8 +27,6 @@ RUN microdnf update -y && \
 	caddy \
     && microdnf clean all
 
-# Create a non-root user
-RUN useradd -m -u 1000 appuser
 USER appuser
 
 # Working directory inside the container
