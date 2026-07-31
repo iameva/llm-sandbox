@@ -11,4 +11,4 @@ podman run --rm -it \
   --tmpfs /run:rw,size=16M \
   --network=slirp4netns \
   llm-sandbox \
-  aider
+  aider "$@"

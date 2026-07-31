@@ -14,4 +14,4 @@ podman run --rm -it \
   --tmpfs /run:rw,size=16M \
   --network=slirp4netns \
   llm-sandbox \
-  /home/appuser/.opencode/bin/opencode
+  /home/appuser/.opencode/bin/opencode "$@"

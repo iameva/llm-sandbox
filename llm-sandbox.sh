@@ -16,4 +16,4 @@ podman run --rm -it \
   --tmpfs /run:rw,size=16M \
   --network=host \
   llm-sandbox \
-  zsh
+  zsh "$@"
