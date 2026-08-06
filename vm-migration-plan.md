@@ -17,7 +17,7 @@ below marked "needs host verification" is unproven.
 | 2 collapse | code done, argv verified against the old scripts |
 | 3 log-only egress | ready to run; needs a week of wall clock |
 | 4 enforce egress | proxy tested; confinement redesigned, unverified |
-| 5 vm switch | **works** — guest kernel 6.12.91 confirmed 2026-08-04 |
+| 5 vm switch | boots, but uid mapping is broken; fix written 2026-08-06, untested |
 | 6 credentials | partly done; the rest is account-side |
 | 7 flip default | deliberately not done — needs soak first |
 
@@ -214,11 +214,156 @@ not having to guess the guest's memory ceiling in advance.
 
 **Verified 2026-08-04:**
 - guest kernel 6.12.91 against host 7.0.12-101.fc43.x86_64
-- `/workspace` writes land as uid 1000 gid 1000 on the host, matching
-  the guest — virtiofs plus `keep-id` maps ownership correctly
 - `/tmp` reports `fuse`, so the disk-backed mount is in effect
 
-**Still untested:**
+### uid mapping is broken under krun
+
+The 2026-08-04 entry also claimed `keep-id` mapped ownership correctly,
+on the strength of `--check` reporting uid 1000 on `/workspace`. That
+was wrong. `--check` never compared that number against the guest's own
+uid, so it read a mismatch as a pass.
+
+The first real session in vm mode failed at startup:
+
+```
+Temp directory /tmp/claude-0 is owned by uid 1000, expected 0.
+```
+
+Measured 2026-08-06:
+
+| | `id -u` | file it creates | consistent |
+| --- | --- | --- | --- |
+| container | 1000 | 1000 | yes |
+| vm | 0 | 1000 | no |
+
+`/run` is also not writable by that nominal root. The guest runs its
+entrypoint as uid 0, and virtiofsd — unprivileged, running as the
+invoking user — can only present files as uid 1000. So a process writes
+a file as root and reads it back owned by someone else. Claude Code
+creates `/tmp/claude-0` and then refuses to trust it, correctly.
+
+Nothing is wrong with `/workspace` ownership on the host. The break is
+that the guest disagrees with itself, which any tool checking who owns
+its own files will refuse to run under.
+
+Dropping `--userns=keep-id` was the first guess. It is wrong, and
+measurably worse:
+
+| vm mode | writes | ownership |
+| --- | --- | --- |
+| `keep-id` | succeed everywhere | process uid 0, files uid 1000 |
+| `none` | `/workspace` not writable at all | n/a |
+
+Guest root has no authority over virtiofs, so under `none` only
+world-writable paths — the image's sticky `/tmp` — accept a write. The
+mapping was never the problem.
+
+### krun ignores parts of the podman spec
+
+Three things the runtime silently drops, all found on 2026-08-06:
+
+- **`USER` in the image.** The entrypoint runs as uid 0 despite
+  `USER appuser`. This is the cause of the uid split.
+- **`--user`.** Passing `--user 1000:1000` changes nothing; the process
+  is still uid 0. So the uid cannot be set from outside either.
+- **`--tmpfs`.** `SANDBOX_TMP=tmpfs` passes `--tmpfs /tmp` and `/tmp`
+  still reports `fuse`. The same applies to `--tmpfs /run`, which is why
+  `/run` is not writable in vm mode.
+
+The second one retires the `/tmp` reasoning above for vm mode: every
+path is virtiofs whatever podman is asked for, so the guest cannot OOM
+on a `/tmp` write and the bind mount is not buying anything the runtime
+would not have done anyway. It stays because container mode honours
+`--tmpfs` and still needs it.
+
+Anything else in the podman spec that matters should be assumed dropped
+until `--check` proves otherwise.
+
+### No `--userns` mapping reconciles it
+
+Three tried on 2026-08-06:
+
+| `--userns` | writes | ownership |
+| --- | --- | --- |
+| `keep-id` | succeed everywhere | process 0, files 1000 |
+| `none` | `/workspace` not writable | — |
+| `keep-id:uid=0,gid=0` | `/workspace` not writable | — |
+
+Inference, not measurement: libkrun's virtiofs does its own uid
+translation that podman's `--userns` does not drive, so each mapping
+lands on a different broken combination rather than composing. Under
+plain `keep-id` the guest's uid 0 is root within a userns that has host
+1000 mapped, which is why writes work there and nowhere else.
+
+Two smaller things were fixed along the way and do now pass: `HOME` is
+set explicitly to `/home/appuser` in vm mode, since the runtime
+otherwise hands a root process `/root` — nowhere near the credential
+mounts — and `--check` verifies every mount exists and is readable.
+
+**Phase 5 is blocked.** The default is back to plain `keep-id`, the
+least broken of the three, and vm mode warns before starting an agent.
+It is not a working sandbox: anything comparing its own uid against a
+file it owns refuses to run. Claude Code's temp directory check is one.
+git's dubious-ownership check on `/workspace` is the next one waiting,
+and that one matters more, since reviewing the agent's commits is a
+control this plan depends on.
+
+### Where that leaves the plan
+
+Four podman guarantees do not hold under krun — `USER`, `--user`,
+`--tmpfs`, and `--userns` composing with the guest's file ownership.
+That is a pattern, not a run of bad luck, and the next thing to break is
+unlikely to announce itself as clearly as an ownership check did.
+
+### gVisor as a third mode
+
+`SANDBOX_ISOLATION=gvisor` is wired up, unverified — nothing has run it,
+because runsc is not installed.
+
+It is worth trying before either option below because it keeps the
+property both of them cost: it is an OCI runtime, so it is one flag,
+the same image, the same eight entry points and the same `--check`.
+
+The reason to expect better than krun is specific rather than hopeful.
+krun failed by ignoring parts of the OCI spec — `USER`, `--user`,
+`--tmpfs`. gVisor implements them, including a real tmpfs of its own, so
+the uid mismatch should not arise. `--check` decides it; three
+predictions about krun were wrong in one evening, so nothing here is
+assumed.
+
+What it does not give: a hardware boundary. The Sentry is a userspace
+kernel, and escaping it needs a Sentry bug plus defeating its seccomp
+filter — much harder than a kernel LPE, weaker than KVM. And it does
+nothing for egress enforcement: same rootless pasta, same problem.
+
+Cost is speed on syscall-heavy work, which means builds. gVisor's own
+overlay (`--overlay2`) recovers much of it, and is separately
+interesting because it is the copy-on-write behaviour the injected
+filesystem wants.
+
+### The two bigger options
+
+Two ways forward, and they are not equal:
+
+1. **Drop the VM for now and finish egress.** The threat model already
+   says prompt injection is likelier than hostile code execution, and
+   that a VM does nothing for it. Phase 3 is unblocked, needs no new
+   code, and costs a week of wall clock that has not started. Container
+   mode passes every check.
+2. **Persistent VM over ssh**, the fallback named on 2026-08-02. The uid
+   question becomes ordinary Unix instead of a runtime's mapping policy,
+   and it restores the real network device that phase 4's enforcement
+   was originally designed around. Cost is writing lifecycle management
+   and losing the one-flag property that made phase 5 attractive.
+
+Doing 1 does not prevent 2. Doing 2 first spends the week that 1 needs
+anyway.
+
+`--check` now prints the process uid and compares it against a file it
+creates, in both `/workspace` and `/tmp`. That is the reason this
+section can be trusted next time; the 2026-08-04 entry could not be,
+because the check read a file's uid and never asked whether the process
+agreed.
 - build throughput over virtiofs, which is the reason to soak before
   phase 7. A `cargo build` on a cold target directory is the honest
   measure, since it is metadata-heavy and `/tmp` is no longer RAM
@@ -227,9 +372,13 @@ not having to guess the guest's memory ceiling in advance.
   failed one
 - `dmesg | head` shows a fresh boot
 - no host `/proc`, no host `$HOME` beyond mounted config dirs
-- a real task's edits land in host `$PWD` with correct ownership —
-  this is where virtiofs plus keep-id will bite
 - phase 1 and 4 tests still pass under `vm`
+
+`SANDBOX_TMP=tmpfs` now forces the tmpfs branch. Without it that branch
+was unreachable once `ISOLATION=vm`, so a `/tmp` problem caused by the
+bind mount could not be told apart from one caused by the VM. That is
+how the uid failure first looked like a `/tmp` problem. Under vm it is
+diagnostic only, since krun ignores `--tmpfs`.
 
 ## Phase 6 — shrink credential scope
 

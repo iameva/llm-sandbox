@@ -6,13 +6,29 @@
 # side would have executed. Every difference should be one of the
 # intended phase-1 changes, which are listed per agent below.
 #
-# Usage: ./test-argv.sh [git-ref]      (default: the commit before HEAD's
-#                                       wrapper removal, i.e. HEAD)
+# Usage: ./test-argv.sh [git-ref]
+#
+# Default ref is the parent of whichever commit deleted the wrappers,
+# found at run time. Hardcoding HEAD went stale the moment the deletion
+# was committed, and the failure was silent — every agent SKIPped and
+# the script still exited 0.
 
 set -euo pipefail
 
-REF="${1:-HEAD}"
 REPO="$(cd "$(dirname "$0")" && pwd)"
+
+default_ref() {
+    local del
+    del="$(git -C "$REPO" rev-list -1 HEAD -- claude-sandbox.sh)"
+    [[ -n "$del" ]] || { echo "HEAD"; return; }
+    if git -C "$REPO" cat-file -e "$del:claude-sandbox.sh" 2>/dev/null; then
+        echo "$del"          # still present there
+    else
+        echo "${del}^"       # that commit removed it
+    fi
+}
+
+REF="${1:-$(default_ref)}"
 WORK="$(mktemp -d)"
 trap 'rm -rf -- "$WORK"' EXIT
 
@@ -54,7 +70,10 @@ fail=0
 for agent in "${!OLD[@]}"; do
     script="${OLD[$agent]}"
     if ! git -C "$REPO" show "$REF:$script" > "$WORK/$script" 2>/dev/null; then
+        # A skip is a failure. The whole point is comparing against the
+        # old wrappers; if they cannot be found, nothing was compared.
         echo "SKIP $agent — $script not found at $REF" >&2
+        fail=1
         continue
     fi
     chmod +x "$WORK/$script"
