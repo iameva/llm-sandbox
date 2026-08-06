@@ -1,0 +1,26 @@
+# Egress allowlist for the LLM sandbox.
+#
+# One hostname per line. A leading dot matches subdomains and the bare
+# domain: ".deepseek.com" matches api.deepseek.com and deepseek.com.
+# Everything else is refused. Port 443 only, unless --ports says otherwise.
+#
+# THIS IS A STARTING GUESS, not a verified list. Produce the real one by
+# running the proxy in log mode through a week of normal work, then:
+#     ,egress-proxy.py --summarize > egress-allowlist.txt
+# and reviewing every line before enforcing.
+
+# --- Anthropic / Claude Code ---
+api.anthropic.com
+
+# --- DeepSeek (deepseek-claude-code entry point) ---
+.deepseek.com
+
+# --- OpenAI / codex ---
+# codex authenticates against chatgpt.com and calls the API host.
+# Confirm both in log mode; they may differ by auth method.
+chatgpt.com
+api.openai.com
+
+# --- aider, opencode, pi, omp ---
+# All four are provider-agnostic and reach whatever they are configured
+# for. Log mode will show which. Add nothing here on faith.

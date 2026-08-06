@@ -1,12 +1,21 @@
 #!/bin/sh
+# Install the sandbox entry points into ~/.local/bin.
+#
+# Every agent entry point is a copy of sandbox-run.sh, which recovers the
+# agent name from $0. One file, so a change to the run arguments cannot
+# apply to some agents and miss others.
 
-cp claude-sandbox.sh ~/.local/bin/,claude-sandbox.sh
-cp deepseek-claude-code.sh ~/.local/bin/,deepseek-claude-code.sh
-cp codex-sandbox.sh ~/.local/bin/,codex-sandbox.sh
-cp llm-sandbox.sh ~/.local/bin/,llm-sandbox.sh
-cp opencode-sandbox.sh ~/.local/bin/,opencode-sandbox.sh
-cp aider-sandbox.sh ~/.local/bin/,aider-sandbox.sh
-cp pi-sandbox.sh ~/.local/bin/,pi-sandbox.sh
-cp omp-sandbox.sh ~/.local/bin/,omp-sandbox.sh
+set -eu
 
-cp copy-session.sh ~/.local/bin/,copy-session.sh
+BIN="${HOME}/.local/bin"
+mkdir -p "$BIN"
+
+for agent in claude codex llm opencode aider pi omp; do
+    install -m 0755 sandbox-run.sh "$BIN/,${agent}-sandbox.sh"
+done
+
+install -m 0755 sandbox-run.sh "$BIN/,deepseek-claude-code.sh"
+install -m 0755 sandbox-run.sh "$BIN/,sandbox-run.sh"
+
+install -m 0755 copy-session.sh "$BIN/,copy-session.sh"
+install -m 0755 egress-proxy.py "$BIN/,egress-proxy.py"
