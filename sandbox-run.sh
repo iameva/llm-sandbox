@@ -21,11 +21,23 @@
 #                       gvisor needs a hand-installed runsc; vm needs
 #                       crun-krun and /dev/kvm, and is currently broken
 #                       (see the uid note below).
-#   SANDBOX_RUNSC       path to runsc, if it is not on PATH
+#   SANDBOX_RUNSC       path to runsc, if it is not on PATH. A bare name
+#                       (no '/') is treated as a runtime declared in
+#                       containers.conf and passed through untouched.
+#   SANDBOX_RUNSC_FLAGS global flags for runsc, default --ignore-cgroups.
+#                       Applied via a generated wrapper under $ROOT.
+#                       Empty means call runsc directly.
 #   SANDBOX_KRUN        path to krun, if it is not on PATH
 #   SANDBOX_PROXY       host:port of the egress proxy. When set, the
 #                       sandbox gets no DNS and must reach the network
 #                       through this proxy. Unset means unrestricted.
+#                       A loopback address gets a pasta port forward, so
+#                       the proxy can stay bound to host loopback.
+#   SANDBOX_PASTA_FORWARD  0 to suppress that forward.
+#   SANDBOX_PROXY_PREFLIGHT  0 to skip the "is the proxy up?" check.
+#   SANDBOX_PROXY_MODE  log | enforce (default). Only affects what
+#                       --check expects: log mode allows everything, so
+#                       reaching a denied host is correct there.
 #   SANDBOX_LABEL_MODE  z (default, shared SELinux label) | Z (private —
 #                       breaks other containers sharing the same paths)
 #   SANDBOX_IMAGE       image name, default llm-sandbox
@@ -298,7 +310,16 @@ else
     say "kernel" "OK  guest $(uname -r), host $HOST_KERNEL"
 fi
 
-devs=$(ls /sys/class/net 2>/dev/null | tr '\n' ' ')
+# /proc/net/dev first: gVisor's netstack does not populate
+# /sys/class/net, so reading only sysfs reports "none" on a sandbox with
+# perfectly good networking. /sys is the fallback, not the source.
+devs=""
+while read -r first _rest; do
+    case "$first" in
+        *:*) n="${first%%:*}"; [ -n "$n" ] && devs="$devs$n " ;;
+    esac
+done < /proc/net/dev 2>/dev/null
+[ -z "$devs" ] && devs=$(ls /sys/class/net 2>/dev/null | tr '\n' ' ')
 say "network devices" "${devs:-none}"
 
 # Read routes from /proc directly. iproute2 is not in the image, so
@@ -364,12 +385,70 @@ own_check /tmp "tmp write"
 say "tmp backing" "$(stat -f -c %T /tmp 2>/dev/null || echo unknown)"
 
 if [ -n "${HTTPS_PROXY:-}" ]; then
-    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 https://api.anthropic.com/v1/messages 2>/dev/null || echo 000)
-    [ "$code" = "000" ] && bad "egress allowed host" "no response (proxy unreachable?)" \
-                        || say "egress allowed host" "OK  http $code"
-    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 https://example.com/ 2>/dev/null || echo 000)
-    [ "$code" = "000" ] && say "egress denied host" "OK  refused" \
-                        || bad "egress denied host" "reachable, http $code — allowlist not enforced"
+    # curl prints %{http_code} even when it fails, so the old
+    # `curl ... || echo 000` appended a second 000 and produced "000000".
+    # That matched neither branch of the comparison and inverted both
+    # verdicts: a dead proxy read as OK, a correct refusal read as FAIL.
+    # Keep the fallback inside the substitution.
+    probe_http() {
+        curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$1" 2>/dev/null || true
+    }
+
+    # Reachability first. A denied host and an unreachable proxy both
+    # surface as http 000, so without this they are indistinguishable.
+    # A plain GET to the proxy is not CONNECT, so the proxy answers 405 —
+    # any reply at all proves the path works.
+    code=$(probe_http "$HTTPS_PROXY")
+    case "$code" in
+        ""|000) bad "proxy reachable" "no reply from $HTTPS_PROXY — is it running, and is the port forwarded in?" ;;
+        *)      say "proxy reachable" "OK  http $code from the proxy itself" ;;
+    esac
+
+    code=$(probe_http https://api.anthropic.com/v1/messages)
+    case "$code" in
+        ""|000) bad "egress allowed host" "no response — proxy down, or this host is not on the allowlist" ;;
+        *)      say "egress allowed host" "OK  http $code" ;;
+    esac
+
+    # In log mode the proxy allows everything on purpose — that is how
+    # the real allowlist gets learned. Reaching a denied host is then the
+    # correct result, not a failure, and calling it one would train you
+    # to ignore this line during the week that matters most.
+    code=$(probe_http https://example.com/)
+    case "$code" in
+        ""|000)
+            if [ "${PROXY_MODE:-enforce}" = "log" ]; then
+                bad "egress denied host" "refused, but log mode should allow everything — is the proxy really in log mode?"
+            else
+                say "egress denied host" "OK  refused"
+            fi
+            ;;
+        *)
+            if [ "${PROXY_MODE:-enforce}" = "log" ]; then
+                say "egress denied host" "OK  reachable, http $code — expected, log mode allows everything"
+            else
+                bad "egress denied host" "reachable, http $code — allowlist not enforced"
+            fi
+            ;;
+    esac
+fi
+
+# The confinement test, and the only one that proves egress control is
+# more than an honour system.
+#
+# It must use a literal IP. With --dns=none there is no resolver, so a
+# hostname probe fails with "Could not resolve host" before any connect
+# is attempted — that measures DNS, not the filter, and reads as a pass.
+#
+# It must also drop the proxy environment, since the whole point is
+# whether a process that ignores HTTPS_PROXY can still get out.
+if [ "${CONFINED:-0}" = "1" ]; then
+    code=$(env -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy \
+        curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://1.1.1.1/ 2>/dev/null || true)
+    case "$code" in
+        ""|000) say "raw egress (confined)" "OK  refused — IPAddressDeny is holding" ;;
+        *)      bad "raw egress (confined)" "reached 1.1.1.1 directly, http $code — IPAddressDeny is NOT holding, egress control is advisory only" ;;
+    esac
 fi
 
 echo
@@ -394,6 +473,10 @@ elif [[ "${SANDBOX_CHECK:-}" == "1" || "${1:-}" == "--check" ]]; then
         check_mounts+="${m#*:} "
     done
     ENVS+=("CHECK_MOUNTS=${check_mounts% }")
+    # The sandbox cannot tell whether the proxy is logging or enforcing,
+    # and the two have opposite expectations for a denied host.
+    ENVS+=("PROXY_MODE=${SANDBOX_PROXY_MODE:-enforce}")
+    ENVS+=("CONFINED=$([[ "${SANDBOX_CONFINE:-}" == "1" ]] && echo 1 || echo 0)")
     CMD=(zsh -c "$CHECK_SCRIPT")
     set --
 fi
@@ -484,7 +567,60 @@ case "$ISOLATION" in
 gVisor is not packaged for Fedora, so this is a hand-installed binary.
 Container mode still works: unset SANDBOX_ISOLATION."
 
+        # Rootless cgroups. podman writes a systemd cgroup path into the
+        # spec, runsc tries to create the scope on the *system* bus, and
+        # polkit refuses because nothing can prompt:
+        #   creating container: systemd error: Access denied as the
+        #   requested operation requires interactive authentication.
+        # --ignore-cgroups skips cgroup setup, which is what gVisor
+        # documents for rootless.
+        #
+        # podman's --runtime takes a path with no room for flags. The
+        # documented alternative is declaring a named runtime with args
+        # in ~/.config/containers/containers.conf, but that is config
+        # this script does not own and would have to merge into. A
+        # generated wrapper under $ROOT keeps the flags local and
+        # leaves global podman config alone.
+        #
+        # SANDBOX_RUNSC_FLAGS overrides; empty skips the wrapper. A
+        # SANDBOX_RUNSC given as a bare name is left alone, since that
+        # is the containers.conf route and carries its own args.
+        if [[ -n "${SANDBOX_RUNSC_FLAGS+x}" ]]; then
+            RUNSC_FLAGS="$SANDBOX_RUNSC_FLAGS"
+        else
+            RUNSC_FLAGS="--ignore-cgroups"
+        fi
+
+        if [[ -n "$RUNSC_FLAGS" && "$runsc_bin" == */* ]]; then
+            runsc_wrapper="$ROOT/runsc-wrapper"
+            if [[ "$DRY_RUN" != "1" ]]; then
+                mkdir -p "$ROOT"
+                printf '#!/bin/sh\n# Generated by sandbox-run.sh. Set SANDBOX_RUNSC_FLAGS to change.\nexec %q %s "$@"\n' \
+                    "$runsc_bin" "$RUNSC_FLAGS" > "$runsc_wrapper"
+                chmod 0755 "$runsc_wrapper"
+            fi
+            runsc_bin="$runsc_wrapper"
+        fi
+
         argv+=(--runtime "$runsc_bin")
+
+        # runsc cannot read an OCI spec carrying an SELinux label and
+        # refuses the whole run:
+        #   FetchSpec failed: reading spec: SELinux is not supported:
+        #   system_u:system_r:container_t:s0:c181,c430
+        # podman sets that label by default, so it has to come off. Not
+        # optional, and not a preference.
+        #
+        # The cost is real: SELinux type enforcement no longer confines
+        # the sandbox process on the host. Under gvisor the Sentry is the
+        # boundary instead, and gVisor applies its own seccomp filter to
+        # the Sentry, so host-side syscall confinement remains — but a
+        # layer that container mode has is gone. Weigh that when
+        # comparing the two modes; it is not a free swap.
+        #
+        # Volume relabelling (the z/Z suffix) is left alone. It changes
+        # labels on the host, which stays consistent with container mode.
+        argv+=(--security-opt label=disable)
         ;;
     vm)
         # libkrun boots each run as a microVM with its own kernel, so a
@@ -529,7 +665,54 @@ esac
 
 # pasta, never host. --network=host would drop the network namespace and
 # expose every service on the host's loopback and LAN.
-argv+=(--network=pasta)
+#
+# Reaching the proxy is the awkward part. 127.0.0.1 inside the sandbox is
+# the sandbox, not the host, and host loopback is unreachable by design —
+# confirmed by the standing regression test, where `curl localhost:8000`
+# against a host server must fail. That isolation is wanted, but it also
+# blocks a proxy listening on host loopback.
+#
+# pasta's -T forwards a port from the namespace to the host's loopback,
+# so 127.0.0.1:<port> inside reaches 127.0.0.1:<port> outside — and
+# nothing else does. That keeps the proxy bound to host loopback rather
+# than exposed on the LAN, which is the alternative.
+#
+# Only for a loopback SANDBOX_PROXY: a proxy already on a routable
+# address needs no help. SANDBOX_PASTA_FORWARD=0 disables it.
+pasta_opts=""
+if [[ -n "$PROXY" ]]; then
+    proxy_host="${PROXY%:*}"
+    proxy_port="${PROXY##*:}"
+    case "$proxy_host" in
+        127.*|localhost|::1|"[::1]")
+            if [[ "${SANDBOX_PASTA_FORWARD:-1}" == "1" ]]; then
+                pasta_opts="-T,${proxy_port}"
+            fi
+            ;;
+    esac
+fi
+
+# The forward works under container mode and cannot work under gvisor.
+# Measured 2026-08-06, probing the proxy from inside each:
+#   container, http://127.0.0.1:9090   -> 405   (reached it)
+#   gvisor,    http://127.0.0.1:9090   -> 000
+#   gvisor,    http://192.168.86.1:9090 -> 000
+# gVisor runs its own network stack, so 127.0.0.1 inside the sandbox is
+# gVisor's loopback, not the namespace's. pasta's -T listener sits in the
+# kernel netns, which gVisor never touches — everything it sends goes out
+# the tap to pasta, which then connects from the host. Only an address
+# the sandbox can route to is reachable.
+if [[ -n "$pasta_opts" && "$ISOLATION" == "gvisor" ]]; then
+    echo "sandbox-run: WARNING — a loopback SANDBOX_PROXY cannot be reached under gvisor." >&2
+    echo "sandbox-run: gVisor has its own network stack, so pasta's port forward is invisible to it." >&2
+    echo "sandbox-run: Bind the proxy to a host address the sandbox can route to. See vm-migration-plan.md." >&2
+fi
+
+if [[ -n "$pasta_opts" ]]; then
+    argv+=("--network=pasta:${pasta_opts}")
+else
+    argv+=(--network=pasta)
+fi
 
 argv+=(-v "$PWD:/workspace:${LABEL_MODE},rw")
 for m in "${MOUNTS[@]}"; do
@@ -618,10 +801,60 @@ if [[ "${SANDBOX_CONFINE:-}" == "1" ]]; then
     proxy_addr="${PROXY%:*}"
     [[ -n "$proxy_addr" ]] || die "cannot read an address out of SANDBOX_PROXY='$PROXY'"
 
+    # Measured 2026-08-06 on this host: IPAddressDeny had no effect on a
+    # rootless `systemd-run --user --scope`. --check reached 1.1.1.1
+    # directly with the proxy environment stripped. The properties are
+    # accepted without error and silently do nothing, which is the worst
+    # failure shape — it looks confined and is not.
+    #
+    # Left in place because it costs nothing and may work elsewhere, or
+    # after cgroup BPF delegation is sorted. Do not treat it as a control
+    # until `--check` reports "raw egress (confined) OK".
+    if [[ "${SANDBOX_CONFINE_ACK:-}" != "1" ]]; then
+        echo "sandbox-run: WARNING — SANDBOX_CONFINE was measured as a no-op on a rootless" >&2
+        echo "sandbox-run: user scope (2026-08-06). Confirm with --check before relying on it;" >&2
+        echo "sandbox-run: 'raw egress (confined) OK' is the only evidence that counts." >&2
+        echo "sandbox-run: Silence with SANDBOX_CONFINE_ACK=1." >&2
+    fi
+
     argv=(systemd-run --user --scope --quiet --collect
           -p IPAddressDeny=any
           -p "IPAddressAllow=${proxy_addr}"
           -- "${argv[@]}")
+fi
+
+# ---------------------------------------------------------------------
+# Proxy preflight
+#
+# Setting a proxy also sets --dns=none, so an agent launched against a
+# dead proxy has no working network at all. The failure then surfaces as
+# whatever that agent does when every API call times out, which is rarely
+# "the proxy is not running". One TCP connect turns that into a sentence.
+#
+# It also protects the log-mode soak. A session that runs without the
+# proxy leaves a gap in the log, and an allowlist built from a log with
+# gaps is missing hosts that are actually needed — which only shows up
+# later, at enforce time, as a broken agent.
+#
+# SANDBOX_PROXY_PREFLIGHT=0 skips it.
+# ---------------------------------------------------------------------
+
+if [[ -n "$PROXY" && "$DRY_RUN" != "1" && "${SANDBOX_PROXY_PREFLIGHT:-1}" == "1" ]]; then
+    pf_host="${PROXY%:*}"
+    pf_port="${PROXY##*:}"
+    pf_cmd=(bash -c "exec 3<>/dev/tcp/${pf_host}/${pf_port}")
+    if command -v timeout >/dev/null 2>&1; then
+        pf_cmd=(timeout 2 "${pf_cmd[@]}")
+    fi
+    if ! "${pf_cmd[@]}" 2>/dev/null; then
+        die "SANDBOX_PROXY=$PROXY is not accepting connections.
+
+  Start it:   ,egress-proxy.py --mode log --listen $PROXY
+  Check it:   ss -lntp | grep '$pf_port'
+
+A proxy also means --dns=none, so the sandbox would have no network at
+all. Skip this check with SANDBOX_PROXY_PREFLIGHT=0."
+    fi
 fi
 
 if [[ "$DRY_RUN" == "1" ]]; then

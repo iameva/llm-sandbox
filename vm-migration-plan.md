@@ -17,7 +17,7 @@ below marked "needs host verification" is unproven.
 | 2 collapse | code done, argv verified against the old scripts |
 | 3 log-only egress | ready to run; needs a week of wall clock |
 | 4 enforce egress | proxy tested; confinement redesigned, unverified |
-| 5 vm switch | boots, but uid mapping is broken; fix written 2026-08-06, untested |
+| 5 vm switch | krun dead — uid mapping unfixable; **gvisor works** 2026-08-06 |
 | 6 credentials | partly done; the rest is account-side |
 | 7 flip default | deliberately not done — needs soak first |
 
@@ -315,26 +315,64 @@ Four podman guarantees do not hold under krun — `USER`, `--user`,
 That is a pattern, not a run of bad luck, and the next thing to break is
 unlikely to announce itself as clearly as an ownership check did.
 
-### gVisor as a third mode
+### gVisor works — verified 2026-08-06
 
-`SANDBOX_ISOLATION=gvisor` is wired up, unverified — nothing has run it,
-because runsc is not installed.
+`SANDBOX_ISOLATION=gvisor` passes every check on the host:
 
-It is worth trying before either option below because it keeps the
-property both of them cost: it is an OCI runtime, so it is one flag,
-the same image, the same eight entry points and the same `--check`.
+```
+isolation                    gvisor
+kernel                       OK  guest 4.19.0-gvisor, host 7.0.12-101.fc43.x86_64
+process uid                  1000 (appuser)
+home                         /home/appuser
+mount /home/appuser/.claude  OK  readable
+workspace write              OK  uid 1000 gid 1000
+tmp write                    OK  uid 1000 gid 1000
+tmp backing                  tmpfs
+```
 
-The reason to expect better than krun is specific rather than hopeful.
-krun failed by ignoring parts of the OCI spec — `USER`, `--user`,
-`--tmpfs`. gVisor implements them, including a real tmpfs of its own, so
-the uid mismatch should not arise. `--check` decides it; three
-predictions about krun were wrong in one evening, so nothing here is
-assumed.
+Every krun failure is absent. `USER` is honoured, so the process is uid
+1000 and agrees with the files it writes. `--tmpfs` is honoured, so
+`/tmp` is a real tmpfs. The kernel differs from the host, so the runtime
+genuinely engaged rather than silently falling back.
+
+That is the difference that mattered: gVisor implements the OCI spec
+where krun ignores parts of it.
+
+It also keeps the property the two bigger options below both cost — one
+flag, same image, same eight entry points, same `--check`.
+
+Three accommodations were needed, all in `sandbox-run.sh`:
+`--security-opt label=disable`, `--ignore-cgroups` via a generated
+wrapper under `$ROOT`, and a hand-installed `runsc` since Fedora does
+not package it.
+
+`--check` had a blind spot here: it read `/sys/class/net`, which gVisor
+does not populate, and reported `network devices none` on a sandbox with
+a working route. It now reads `/proc/net/dev` with sysfs as fallback.
+Same class of mistake as the 2026-08-04 ownership claim — a check that
+looked in one place and reported absence as fact.
 
 What it does not give: a hardware boundary. The Sentry is a userspace
 kernel, and escaping it needs a Sentry bug plus defeating its seccomp
 filter — much harder than a kernel LPE, weaker than KVM. And it does
 nothing for egress enforcement: same rootless pasta, same problem.
+
+**It also costs SELinux.** runsc refuses any OCI spec carrying an
+SELinux label:
+
+```
+FetchSpec failed: reading spec: SELinux is not supported:
+system_u:system_r:container_t:s0:c181,c430
+```
+
+podman sets that label by default, so gvisor mode has to pass
+`--security-opt label=disable`. Not a preference — the mode does not
+start otherwise. Type enforcement therefore no longer confines the
+sandbox process on the host; gVisor's own seccomp filter on the Sentry
+remains. So the comparison against container mode is not a clean
+upgrade: it trades a host-side MAC layer for a much smaller guest-side
+kernel surface. Volume relabelling is left alone, so host labels stay
+as container mode leaves them.
 
 Cost is speed on syscall-heavy work, which means builds. gVisor's own
 overlay (`--overlay2`) recovers much of it, and is separately
@@ -447,11 +485,65 @@ entirely and would still work if libkrun switched to virtio-net.
 `SANDBOX_PROXY`, since denying every address without a proxy to reach
 leaves no network at all.
 
-Unverified: whether `IPAddressDeny` takes effect for a rootless
-`systemd-run --user --scope`. These are cgroup BPF properties and the
-user manager may need delegation. If it silently does nothing, the
-fallback is an nftables rule matching the scope's cgroup path, which is
-stable and known because the scope names it.
+**Answered 2026-08-06, and the answer is no.** `IPAddressDeny` has no
+effect on a rootless `systemd-run --user --scope` on this host. With
+`SANDBOX_CONFINE=1` and the proxy environment stripped inside the
+sandbox, `--check` reached `https://1.1.1.1/` and got HTTP 301:
+
+```
+raw egress (confined)  FAIL  reached 1.1.1.1 directly, http 301
+                             — IPAddressDeny is NOT holding
+```
+
+The properties are accepted without error and silently do nothing. That
+is the worst failure shape available: it looks confined and is not.
+Likely cause is that attaching a cgroup BPF filter needs privileges the
+user manager does not have, so the setting is parsed and dropped.
+
+`--check` now runs this probe automatically whenever `SANDBOX_CONFINE=1`,
+and the runner warns on every confined run until `--check` says
+otherwise. The probe must use a literal IP: with `--dns=none`, a hostname
+fails to resolve before any connect is attempted, which measures DNS and
+reads as a pass. An earlier hand-run test made exactly that mistake and
+looked like success.
+
+### So egress control is advisory today
+
+Both modes. The proxy stops an agent that follows instructions. It does
+not stop code that opens a socket to a literal IP — a dependency's
+install script, a downloaded binary, anything in threat 3. That is worth
+stating plainly because the rest of this document could otherwise read as
+though phase 4 were done.
+
+Three ways forward:
+
+1. **nftables rule matching the scope's cgroup.** Needs `sudo` once, then
+   persists. Requires a stable cgroup path, so the scope needs a fixed
+   name via `systemd-run --unit=`, not the random `run-r<hex>.scope` it
+   currently gets.
+2. **A system scope instead of a user scope.** `sudo systemd-run --scope
+   --uid=$(id -u) -p IPAddressDeny=any -- podman run …`. The system
+   manager has the privileges the user manager lacks. Costs a `sudo` per
+   run, or a sudoers rule, and needs `XDG_RUNTIME_DIR` and `HOME`
+   preserved for rootless podman.
+3. **Accept it.** Keep the proxy for observability and for well-behaved
+   tools, and rely on the gVisor boundary for hostile code. Given the
+   threat model puts prompt injection first — where the agent is
+   following instructions and the proxy does bind — this is defensible,
+   but it should be a decision, not a default.
+
+Before building any of them, confirm the diagnosis with a two-line test
+that involves no sandbox at all:
+
+```sh
+systemd-run --user --scope -q -p IPAddressDeny=any -- \
+  curl -sS --max-time 5 -o /dev/null -w '%{http_code}\n' https://1.1.1.1/
+sudo systemd-run --scope -q -p IPAddressDeny=any -- \
+  curl -sS --max-time 5 -o /dev/null -w '%{http_code}\n' https://1.1.1.1/
+```
+
+If the first returns 301 and the second fails to connect, the privilege
+theory holds and option 2 is the cheap fix.
 
 **Test it, do not assume it.** With the proxy in enforce mode and
 `SANDBOX_CONFINE=1`, from inside the sandbox:
@@ -507,14 +599,104 @@ SANDBOX_PROXY=127.0.0.1:8080 ,claude-sandbox.sh
 After a week:
 
 ```sh
-,egress-proxy.py --summarize > egress-allowlist.txt   # then review it
-,egress-proxy.py --mode enforce --allow-file egress-allowlist.txt &
+# Review every line before enforcing.
+,egress-proxy.py --summarize > ~/.config/llm-sandbox/egress-allowlist.txt
+,egress-proxy.py --mode enforce &   # reads that path by default
 ```
 
-The proxy address must be reachable from inside the sandbox. Under
-pasta the host is normally reachable, but the exact address needs
-checking on the host — `127.0.0.1` inside the sandbox is the sandbox
-itself, not the host.
+The proxy address must be reachable from inside the sandbox, and
+`127.0.0.1` inside the sandbox is the sandbox, not the host. Host
+loopback is unreachable by design — that is exactly what the phase 1
+regression test proves when `curl localhost:8000` fails.
+
+Resolved for container mode 2026-08-06. A loopback `SANDBOX_PROXY` adds
+pasta's `-T` port forward, so `127.0.0.1:<port>` inside reaches host
+loopback on the same port and nothing else does. Verified end to end —
+the proxy log shows real CONNECT tunnels to `api.anthropic.com` and
+`example.com` from inside the sandbox.
+
+**Not resolved for gvisor, and it cannot be.** Measured, probing the
+proxy from inside each mode:
+
+| mode | target | result |
+| --- | --- | --- |
+| container | `http://127.0.0.1:9090` | 405 — reached it |
+| gvisor | `http://127.0.0.1:9090` | 000 |
+| gvisor | `http://192.168.86.1:9090` | 000 |
+
+gVisor runs its own network stack. `127.0.0.1` inside the sandbox is
+gVisor's loopback, not the namespace's, and pasta's `-T` listener sits in
+the kernel netns that gVisor never touches. Everything the sandbox sends
+goes out the tap to pasta, which then opens the connection from the host.
+So only an address the sandbox can *route* to is reachable, and the
+runner now warns when a loopback proxy is combined with gvisor.
+
+### Reaching the proxy under gvisor
+
+Three options, in order of how much they widen the sandbox's reach:
+
+1. **A dummy interface on the host.** Bind the proxy to an address the
+   host owns that is not reachable from the LAN. NetworkManager can hold
+   it, so it survives reboots without a unit file — which matters on an
+   image-based OS:
+
+   ```sh
+   sudo nmcli connection add type dummy ifname sbxproxy con-name sbxproxy \
+        ipv4.method manual ipv4.addresses 10.99.0.1/32 \
+        ipv6.method disabled connection.autoconnect yes
+   sudo nmcli connection up sbxproxy
+   ip -4 addr show sbxproxy          # expect 10.99.0.1/32
+
+   ,egress-proxy.py --mode log --listen 10.99.0.1:9090
+   SANDBOX_PROXY=10.99.0.1:9090
+   ```
+
+   The sandbox has no route for `10.99.0.1`, so it goes out the default
+   route to pasta; pasta opens the connection from the host, where the
+   address is local. Exactly one address and port become reachable — as
+   tight as the loopback arrangement was meant to be — and it composes
+   with `SANDBOX_CONFINE`, which then allows only that address.
+
+   Pick a range the LAN does not use. Here the LAN is 192.168.86.0/24,
+   so 10.99.0.0/24 is free.
+
+   **Verified 2026-08-06.** With the dummy interface up, gvisor passes
+   every check including `proxy reachable`, and the proxy log records
+   real CONNECT tunnels from inside the sandbox. Both isolation modes now
+   have a working egress path.
+
+   Note when reading `--check` output: `egress allowed host OK http 405`
+   is Anthropic answering a GET on a POST-only endpoint, not the proxy's
+   own 405 for a non-CONNECT request. The two are indistinguishable by
+   code alone; the proxy log disambiguates.
+
+2. **Bind to the host's LAN address.** Was listed as a working-but-
+   exposed option. It is probably not working at all: pasta copies the
+   host's address into the namespace, so the host's own LAN address is
+   local from inside and never routes out — the same failure as
+   loopback, and consistent with the gateway probe returning 000.
+   Rejected on both counts.
+
+3. **pasta `--map-gw`.** No setup, but it maps the gateway to host
+   loopback wholesale, so every service on host loopback becomes
+   reachable at the gateway address. That undoes what the phase 1
+   `--network=host` fix was for. Rejected.
+
+Option 1 is the recommendation. Options 2 and 3 both widen egress, which
+is the opposite of this phase's purpose.
+
+`SANDBOX_PASTA_FORWARD=0` suppresses the forward; a routable proxy gets
+no forward, since it needs none.
+
+Changing the port means changing it in both places, and nowhere else:
+
+```sh
+,egress-proxy.py --mode log --listen 127.0.0.1:9090
+SANDBOX_PROXY=127.0.0.1:9090 ,claude-sandbox.sh
+```
+
+`--ports` on the proxy is a different knob: it limits which *destination*
+ports the sandbox may reach, default 443.
 
 ## What is still open
 

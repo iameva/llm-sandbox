@@ -29,6 +29,9 @@ Two modes:
     enforce   deny anything not on the allowlist.
 
 Turn a log into an allowlist with --summarize.
+
+The allowlist and the log both default into ~/.config/llm-sandbox, so
+the installed proxy and the list it enforces cannot drift apart.
 """
 
 from __future__ import annotations
@@ -47,6 +50,10 @@ import time
 CONNECT_TIMEOUT = 15
 IDLE_TIMEOUT = 300
 BUF = 65536
+
+CONFIG_DIR = os.path.expanduser("~/.config/llm-sandbox")
+DEFAULT_ALLOW_FILE = os.path.join(CONFIG_DIR, "egress-allowlist.txt")
+DEFAULT_LOG = os.path.join(CONFIG_DIR, "egress.log")
 
 # Written by the serve path, read by nothing else in-process.
 log_lock = threading.Lock()
@@ -294,10 +301,11 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--mode", choices=("log", "enforce"), default="log",
                     help="log: allow all and record. enforce: deny by default.")
-    ap.add_argument("--allow-file", help="one hostname per line; '.x.com' matches subdomains")
+    ap.add_argument("--allow-file",
+                    help="one hostname per line; '.x.com' matches subdomains "
+                         f"(default: {DEFAULT_ALLOW_FILE})")
     ap.add_argument("--listen", default="127.0.0.1:8080", help="host:port to bind")
-    ap.add_argument("--log", default=os.path.expanduser(
-        "~/.config/llm-sandbox/egress.log"), help="append decisions here")
+    ap.add_argument("--log", default=DEFAULT_LOG, help="append decisions here")
     ap.add_argument("--ports", default="443",
                     help="comma-separated destination ports to permit")
     ap.add_argument("--summarize", action="store_true",
@@ -308,9 +316,20 @@ def main():
         summarize(args.log)
         return
 
-    allowlist = load_allowlist(args.allow_file)
+    # A missing default file is not an error: log mode is what you run
+    # before any allowlist exists. A missing file you asked for by name
+    # is an error, because silently enforcing nothing is the one outcome
+    # you would never want from a typo.
+    allow_file = args.allow_file
+    if allow_file is None:
+        allow_file = DEFAULT_ALLOW_FILE if os.path.exists(DEFAULT_ALLOW_FILE) else None
+    elif not os.path.exists(allow_file):
+        sys.exit(f"no such allow file: {allow_file}")
+
+    allowlist = load_allowlist(allow_file)
     if args.mode == "enforce" and not allowlist:
-        sys.exit("enforce mode needs a non-empty --allow-file")
+        sys.exit(f"enforce mode needs a non-empty allow file; "
+                 f"{allow_file or DEFAULT_ALLOW_FILE} is missing or has no hosts")
 
     bind_host, _, bind_port = args.listen.rpartition(":")
     os.makedirs(os.path.dirname(args.log), exist_ok=True)
@@ -322,7 +341,8 @@ def main():
     server.allowed_ports = {int(p) for p in args.ports.split(",") if p.strip()}
 
     log_event(args.log, decision="startup", mode=args.mode,
-              listen=args.listen, allowlist_size=len(allowlist),
+              listen=args.listen, allow_file=allow_file,
+              allowlist_size=len(allowlist),
               ports=sorted(server.allowed_ports))
     try:
         server.serve_forever()

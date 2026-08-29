@@ -1,26 +1,56 @@
 # Egress allowlist for the LLM sandbox.
 #
-# One hostname per line. A leading dot matches subdomains and the bare
-# domain: ".deepseek.com" matches api.deepseek.com and deepseek.com.
-# Everything else is refused. Port 443 only, unless --ports says otherwise.
+# The proxy refuses every host that is not listed here. One hostname per
+# line; text after '#' is ignored. A leading dot matches subdomains and
+# the bare domain, so ".crates.io" would cover crates.io and
+# index.crates.io both. Port 443 only, unless --ports says otherwise.
 #
-# THIS IS A STARTING GUESS, not a verified list. Produce the real one by
-# running the proxy in log mode through a week of normal work, then:
-#     ,egress-proxy.py --summarize > egress-allowlist.txt
-# and reviewing every line before enforcing.
+# install.sh copies this file to ~/.config/llm-sandbox/egress-allowlist.txt,
+# which is where the proxy looks by default. Edit here, then reinstall.
+#
+# The list only takes effect in enforce mode:
+#     ,egress-proxy.py --mode enforce
+# In log mode the proxy allows everything and just records it, so nothing
+# below is load-bearing until you enforce. Hosts and counts come from one
+# log-mode run; they say what the sandbox reached, not what it needs.
 
-# --- Anthropic / Claude Code ---
-api.anthropic.com
+# --- Claude Code ---
+api.anthropic.com                            # API calls        282
+platform.claude.com                          # auth, console     17
 
-# --- DeepSeek (deepseek-claude-code entry point) ---
-.deepseek.com
+# --- deepseek-claude-code entry point ---
+api.deepseek.com                             # API calls         86
 
-# --- OpenAI / codex ---
-# codex authenticates against chatgpt.com and calls the API host.
-# Confirm both in log mode; they may differ by auth method.
-chatgpt.com
-api.openai.com
+# --- Package registries ---
+# Agents run npm and cargo against projects mounted at /workspace.
+registry.npmjs.org                           # npm install      224
+index.crates.io                              # cargo index       44
+static.crates.io                             # crate downloads   45
+crates.io                                    # cargo API          1
 
-# --- aider, opencode, pi, omp ---
-# All four are provider-agnostic and reach whatever they are configured
-# for. Log mode will show which. Add nothing here on faith.
+# --- Playwright browsers ---
+# Only needed to run `playwright install` inside the sandbox. The image
+# already ships Firefox and Chromium (Containerfile:121-123), so drop all
+# three lines unless you download browsers at runtime. They work as a set:
+# the CDN serves metadata and the other two serve the archives.
+# storage.googleapis.com is every public GCS bucket, not just
+# Playwright's, which makes it the widest grant in this file.
+# cdn.playwright.dev                           # release metadata  14
+# playwright.download.prss.microsoft.com       # browser archives   7
+# storage.googleapis.com                       # browser archives   4
+
+# --- pi agent ---
+# Both the installer (Containerfile:162) and, possibly, the agent's own
+# API. The client field in the proxy log separates build from runtime.
+# pi.dev                                       # installer + API   11
+
+# --- codex (disabled) ---
+# codex is installed but was never used during the log run, so these are
+# unverified guesses. Uncomment if you start using it; expect to check
+# the log to find the real hosts.
+# chatgpt.com                                # auth
+# api.openai.com                             # API calls
+
+# Never add example.com. sandbox-run.sh:417 fetches it to prove enforce
+# mode is refusing unlisted hosts; allowlisting it makes that check pass
+# without testing anything.
