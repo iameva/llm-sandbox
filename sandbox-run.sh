@@ -53,6 +53,10 @@
 #                       per-run directory in vm mode, tmpfs otherwise.
 #                       The literal value 'tmpfs' forces a tmpfs in vm mode.
 #   SANDBOX_TMPFS_SIZE  size of the /tmp tmpfs when one is used, default 512M
+#   SANDBOX_CLAUDE_CONFIG_DIR  1 (default) keeps Claude Code's global
+#                       config inside the ~/.claude directory mount.
+#                       0 restores the old single-file mount of
+#                       ~/.claude.json, which corrupts it (see below).
 #   SANDBOX_DRY_RUN     1 to print the podman argv and exit
 
 set -euo pipefail
@@ -115,6 +119,10 @@ USERNS="${SANDBOX_USERNS:-keep-id}"
 # mismatch if krun ever starts honouring it.
 RUN_USER="${SANDBOX_USER:-}"
 
+# Where Claude Code's global config lives. See claude_config_mounts below
+# for why the default moved.
+CLAUDE_CONFIG_IN_DIR="${SANDBOX_CLAUDE_CONFIG_DIR:-1}"
+
 die() { echo "sandbox-run: $*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------
@@ -156,13 +164,77 @@ CMD=()
 
 HOME_IN_SANDBOX="/home/appuser"
 
+# Set when Claude Code should read its global config from inside the
+# ~/.claude directory mount. Consumed after configure_agent, because
+# several branches there assign ENVS wholesale.
+WANT_CLAUDE_CONFIG_DIR=0
+
+# Where Claude Code will look for its global config inside the sandbox,
+# for --check to probe. Empty for agents that have no such config.
+GLOBAL_CONFIG_PATH=""
+
+# Mounts carrying Claude Code's credentials, appended to MOUNTS.
+#
+# Claude Code writes ~/.claude.json as temp-file + fsync + rename, with
+# the temp beside the target. Mounting the file on its own made it a
+# mount point, so its parent directory was a different device and every
+# rename onto it failed EXDEV. EXDEV is in Claude Code's fallback set, so
+# it dropped to a non-atomic in-place write: open(O_TRUNC), then write.
+# That truncates the live config before writing the replacement, and
+# anything that kills the process in that window — Ctrl-C, podman stop,
+# OOM, host reboot — leaves a 0-byte config on the host. Measured
+# 2026-09-01, after exactly that wiped a config: the file came back
+# 0 bytes and Claude Code reset it.
+#
+# CLAUDE_CONFIG_DIR moves the global config to $CLAUDE_CONFIG_DIR/.claude.json,
+# which puts it inside the directory mount. Same device as its parent, so
+# the rename succeeds and the write is atomic again.
+#
+# The old layout stays reachable with SANDBOX_CLAUDE_CONFIG_DIR=0, and
+# the legacy config file is copied, never moved, so that rollback still
+# has its config.
+#
+# Arguments: <config dir under $ROOT> <legacy config file under $ROOT>
+claude_config_mounts() {
+    local dir="$1" legacy_rel="$2"
+    MOUNTS+=("${dir}:${HOME_IN_SANDBOX}/.claude")
+
+    if [[ "$CLAUDE_CONFIG_IN_DIR" != "1" ]]; then
+        GLOBAL_CONFIG_PATH="${HOME_IN_SANDBOX}/.claude.json"
+        MOUNTS+=("${legacy_rel}:${HOME_IN_SANDBOX}/.claude.json")
+        # Seed valid JSON so podman mounts a file, not a directory.
+        if [[ "$DRY_RUN" != "1" ]]; then
+            mkdir -p "$ROOT/$(dirname "$legacy_rel")"
+            [[ -s "$ROOT/$legacy_rel" ]] || echo '{}' > "$ROOT/$legacy_rel"
+        fi
+        return
+    fi
+
+    WANT_CLAUDE_CONFIG_DIR=1
+    GLOBAL_CONFIG_PATH="${HOME_IN_SANDBOX}/.claude/.claude.json"
+    [[ "$DRY_RUN" == "1" ]] && return
+
+    local legacy="$ROOT/$legacy_rel"
+    local config="$ROOT/${dir}/.claude.json"
+    mkdir -p "$ROOT/${dir}"
+
+    # Only when missing or empty, so a populated config is never lost —
+    # and an empty one is replaced rather than handed over as corrupt.
+    if [[ ! -s "$config" ]]; then
+        if [[ -s "$legacy" ]]; then
+            cp -p "$legacy" "$config"
+            echo "sandbox-run: seeded $config from $legacy" >&2
+        else
+            echo '{}' > "$config"
+        fi
+    fi
+}
+
 configure_agent() {
     case "$1" in
     claude)
-        MOUNTS=(
-            "claude:${HOME_IN_SANDBOX}/.claude"
-            ".claude.json:${HOME_IN_SANDBOX}/.claude.json"
-        )
+        MOUNTS=()
+        claude_config_mounts claude .claude.json
         CMD=(claude --dangerously-skip-permissions)
         ;;
     codex)
@@ -208,10 +280,7 @@ configure_agent() {
         for w in "${want[@]}"; do
             case "$w" in
                 claude)
-                    MOUNTS+=(
-                        "claude:${HOME_IN_SANDBOX}/.claude"
-                        ".claude.json:${HOME_IN_SANDBOX}/.claude.json"
-                    ) ;;
+                    claude_config_mounts claude .claude.json ;;
                 codex)
                     MOUNTS+=(
                         "codex:${HOME_IN_SANDBOX}/.codex"
@@ -235,17 +304,12 @@ configure_agent() {
         local key_file="${HOME}/.config/deepseek.api"
         [[ -r "$key_file" ]] || die "missing DeepSeek key at $key_file"
 
-        mkdir -p "$ROOT/deepseek-claude"
-        # Seed valid JSON on first run so podman mounts a file, not a
-        # directory, and Claude does not choke on an empty config. Only
-        # when missing or empty, so a populated config is never lost.
-        local config="$ROOT/deepseek-claude/.claude.json"
-        [[ -s "$config" ]] || echo '{}' > "$config"
+        # Its config file already sits inside its config directory, so
+        # the legacy path and the CLAUDE_CONFIG_DIR path are the same
+        # file. Nothing to copy; only the mount shape changes.
+        MOUNTS=()
+        claude_config_mounts deepseek-claude deepseek-claude/.claude.json
 
-        MOUNTS=(
-            "deepseek-claude:${HOME_IN_SANDBOX}/.claude"
-            "deepseek-claude/.claude.json:${HOME_IN_SANDBOX}/.claude.json"
-        )
         ENVS=(
             "ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic"
             "ANTHROPIC_AUTH_TOKEN=$(<"$key_file")"
@@ -273,6 +337,12 @@ configure_agent "$AGENT"
 # Applies to every agent: drops telemetry and update-check traffic, which
 # keeps the egress allowlist short.
 ENVS+=("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1")
+
+# Set by claude_config_mounts. Kept out of configure_agent because the
+# deepseek-claude branch assigns ENVS wholesale and would drop it.
+if [[ "$WANT_CLAUDE_CONFIG_DIR" == "1" ]]; then
+    ENVS+=("CLAUDE_CONFIG_DIR=${HOME_IN_SANDBOX}/.claude")
+fi
 
 # HOME. With the guest running as root, the runtime may hand it /root
 # rather than the image's /home/appuser — where every credential mount
@@ -356,6 +426,27 @@ for m in ${=CHECK_MOUNTS:-}; do
         say "mount $m" "OK  readable"
     fi
 done
+
+# Claude Code replaces its global config with rename(temp, config), the
+# temp staged beside it. If the config is its own mount, its parent is a
+# different device, that rename fails EXDEV, and Claude Code falls back to
+# a non-atomic open(O_TRUNC)+write that leaves a 0-byte config if the
+# process dies mid-write. That is not hypothetical: it wiped a config on
+# 2026-09-01. Comparing the two device numbers catches it without writing
+# anything.
+if [ -n "${GLOBAL_CONFIG:-}" ]; then
+    cfg_dir=$(dirname "$GLOBAL_CONFIG")
+    if [ ! -e "$GLOBAL_CONFIG" ]; then
+        bad "config atomic write" "$GLOBAL_CONFIG missing"
+    elif [ ! -s "$GLOBAL_CONFIG" ]; then
+        bad "config atomic write" "$GLOBAL_CONFIG is 0 bytes — already wiped"
+    elif [ "$(stat -c %d "$GLOBAL_CONFIG")" != "$(stat -c %d "$cfg_dir")" ]; then
+        bad "config atomic write" \
+            "$GLOBAL_CONFIG is its own mount; rename from $cfg_dir is EXDEV, so writes are non-atomic and can truncate it. Drop SANDBOX_CLAUDE_CONFIG_DIR=0 to get the safe layout back."
+    else
+        say "config atomic write" "OK  $GLOBAL_CONFIG shares a device with $cfg_dir"
+    fi
+fi
 
 # A file the process just created must read back owned by that process.
 # Anywhere this fails, the uid mapping is wrong, and any tool that checks
@@ -473,6 +564,7 @@ elif [[ "${SANDBOX_CHECK:-}" == "1" || "${1:-}" == "--check" ]]; then
         check_mounts+="${m#*:} "
     done
     ENVS+=("CHECK_MOUNTS=${check_mounts% }")
+    ENVS+=("GLOBAL_CONFIG=${GLOBAL_CONFIG_PATH}")
     # The sandbox cannot tell whether the proxy is logging or enforcing,
     # and the two have opposite expectations for a denied host.
     ENVS+=("PROXY_MODE=${SANDBOX_PROXY_MODE:-enforce}")
