@@ -1,5 +1,5 @@
-# Pinned by digest so a build is reproducible and a compromised or
-# retagged upstream cannot silently change the base.
+# Pin the base image independently of the tools installed below.
+# Tool installers intentionally fetch current releases on a fresh build.
 # Refresh with:
 #   skopeo inspect docker://registry.fedoraproject.org/fedora-minimal:43 | jq -r .Digest
 FROM registry.fedoraproject.org/fedora-minimal:43@sha256:27ccd77437f9e11eb6024aa4a2be0c8b3bb6a4f9ed6f8e112581a3d06af175e9
@@ -90,6 +90,7 @@ RUN microdnf update -y && \
         google-noto-sans-symbols-fonts \
         google-noto-sans-symbols-2-fonts \
         google-noto-color-emoji-fonts \
+	openssl \
     && microdnf clean all
 
 # Reaches the symbol fonts that Firefox's own glyph fallback misses.
@@ -125,43 +126,93 @@ RUN npm install -g "@playwright/test@${PLAYWRIGHT_VERSION}" && \
 # Proves the browsers run here, rather than assuming they do.
 COPY --chmod=0755 browser-smoke.mjs /usr/local/bin/browser-smoke.mjs
 
+RUN microdnf install -y shasum
+
 USER appuser
 
 # Working directory inside the container
 WORKDIR /workspace
 
-# Version pins. Override at build time with --build-arg.
-#
-# The three agent installers below (codex, claude, aider) are fetched
-# unpinned over curl-to-shell, because their installers' version
-# arguments could not be verified from inside the sandbox. Each is a
-# build-time trust of a third party. Pin them once the correct flag is
-# confirmed; that is the remaining supply-chain gap in this image.
+# Agent installers intentionally fetch current releases. Use a build
+# without cache to refresh them. Rust defaults to the current stable release.
+# Download scripts before executing so a failed curl cannot look like success.
 ARG RUST_TOOLCHAIN=stable
-ARG PI_VERSION=latest
 
-# Install Open AI Codex
-RUN curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh
+# Install Open AI Codex.
+#
+# Must run before CODEX_HOME is set below: the installer reads that
+# variable and would put the runtime in the directory we are about to
+# reserve for credentials.
+RUN curl -fsSL https://chatgpt.com/codex/install.sh -o /tmp/install-codex.sh && \
+    CODEX_NON_INTERACTIVE=1 sh /tmp/install-codex.sh && \
+    rm /tmp/install-codex.sh
 
 # Get Rust
-RUN curl https://sh.rustup.rs -sSf | bash -s -- -y --default-toolchain "${RUST_TOOLCHAIN}"
+RUN curl -fsSL https://sh.rustup.rs -o /tmp/install-rust.sh && \
+    bash /tmp/install-rust.sh -y --default-toolchain "${RUST_TOOLCHAIN}" && \
+    rm /tmp/install-rust.sh
 
 # Keep local tooling on PATH (cargo + installed binaries)
 ENV PATH="/home/appuser/.cargo/bin:/home/appuser/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+# Move codex's config and credentials out of its install directory.
+#
+# ~/.codex is two things at once: CODEX_HOME, where auth.json and
+# config.toml live, and the install root, where the installer puts a
+# 320MB runtime under packages/standalone. ~/.local/bin/codex is only a
+# symlink into that runtime. So mounting the host's credentials over
+# ~/.codex — which is what sandbox-run.sh used to do — hid the runtime,
+# left the symlink dangling, and the container failed to start with
+#   error finding executable "codex" in PATH
+#
+# Splitting the two roles fixes it at the source. Codex finds its
+# package relative to its own executable, not through CODEX_HOME, so the
+# runtime stays where the installer put it and only the config directory
+# moves. sandbox-run.sh mounts credentials here instead.
+#
+# Verified with `codex doctor` on 2026-09-07: package, bundled ripgrep
+# and resources all still resolve, and state follows CODEX_HOME.
+#
+# One deliberate side effect: doctor's "update action" drops from
+# "standalone installer" to "manual or unknown", because codex detects a
+# self-updatable install by checking whether its executable sits under
+# CODEX_HOME. Self-update is unwanted here anyway — the base image is
+# pinned by digest, and an update would write into the mounted host
+# credential directory while the symlink kept pointing at the image copy.
+# Rebuild to upgrade.
+ENV CODEX_HOME=/home/appuser/.config/codex
 
 # Add rust analyzer
 RUN rustup component add rust-src
 
 # install Claude Code
-RUN curl -fsSL https://claude.ai/install.sh | bash
+RUN curl -fsSL https://claude.ai/install.sh -o /tmp/install-claude.sh && \
+    bash /tmp/install-claude.sh && \
+    rm /tmp/install-claude.sh
 
 # Install Aider
-RUN curl -LsSf https://aider.chat/install.sh | sh
+RUN curl -fsSL https://aider.chat/install.sh -o /tmp/install-aider.sh && \
+    sh /tmp/install-aider.sh && \
+    rm /tmp/install-aider.sh
 
 # Install pi
-RUN curl -fsSL https://pi.dev/install.sh | sh
+RUN curl -fsSL https://pi.dev/install.sh -o /tmp/install-pi.sh && \
+    sh /tmp/install-pi.sh && \
+    rm /tmp/install-pi.sh
 
 # Install oh-my-pi
-RUN curl -fsSL https://omp.sh/install | sh
+RUN curl -fsSL https://omp.sh/install -o /tmp/install-omp.sh && \
+    sh /tmp/install-omp.sh && \
+    rm /tmp/install-omp.sh
+
+# Install OpenCode. Keep its executable available to both the launcher and shells.
+RUN curl -fsSL https://opencode.ai/install -o /tmp/install-opencode.sh && \
+    bash /tmp/install-opencode.sh --no-modify-path && \
+    rm /tmp/install-opencode.sh
+ENV PATH="/home/appuser/.opencode/bin:${PATH}"
+
+# Catch missing executables during a build, before installing host launchers.
+RUN codex --version && claude --version && aider --version && \
+    pi --version && omp --version && opencode --version
 
 CMD ["zsh"]

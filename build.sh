@@ -1,3 +1,4 @@
 #!/bin/sh
-
-podman build -t llm-sandbox .
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec podman build -t llm-sandbox "$@" "$repo"

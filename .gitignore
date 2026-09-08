@@ -13,3 +13,7 @@ target/
 .local_data/
 .local_data*
 .aider*
+
+# Python bytecode
+__pycache__/
+*.py[cod]

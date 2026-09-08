@@ -44,13 +44,18 @@ crates.io                                    # cargo API          1
 # API. The client field in the proxy log separates build from runtime.
 # pi.dev                                       # installer + API   11
 
-# --- codex (disabled) ---
-# codex is installed but was never used during the log run, so these are
-# unverified guesses. Uncomment if you start using it; expect to check
-# the log to find the real hosts.
-# chatgpt.com                                # auth
-# api.openai.com                             # API calls
+# --- codex ---
+# api.openai.com is measured, not guessed: with it refused, codex retries
+# wss://api.openai.com/v1/responses five times, falls back to HTTPS, and
+# then hangs on "Reconnecting... waiting for network". It needs no extra
+# port — the WebSocket runs over the same CONNECT to 443.
+api.openai.com                               # API calls + websocket
+auth.openai.com                              # API calls + websocket
+# chatgpt.com is still a guess. It serves the installer, and `codex login`
+# is expected to start here, but no logged-in run has confirmed the auth
+# hosts. If login fails, read the proxy log for the refused host rather
+# than widening this further.
+chatgpt.com                                  # installer, probably auth
 
-# Never add example.com. sandbox-run.sh:417 fetches it to prove enforce
-# mode is refusing unlisted hosts; allowlisting it makes that check pass
-# without testing anything.
+# Keep example.com unlisted: --check expects the proxy to return CONNECT
+# 403 for it in enforce mode. This checks the proxy policy, not direct egress.

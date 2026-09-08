@@ -18,6 +18,14 @@ done
 install -m 0755 sandbox-run.sh "$BIN/,deepseek-claude-code.sh"
 install -m 0755 sandbox-run.sh "$BIN/,sandbox-run.sh"
 
+install -m 0755 backend-config.py "$CONF/backend-config.py"
+install -m 0644 backend-provider.mjs "$CONF/backend-provider.mjs"
+install -m 0644 backends.example.json "$CONF/backends.example.json"
+# Set up working defaults on the first install; preserve user changes on reinstall.
+if [ ! -e "$CONF/backends.json" ] && [ ! -L "$CONF/backends.json" ]; then
+    install -m 0644 backends.example.json "$CONF/backends.json"
+fi
+
 install -m 0755 copy-session.sh "$BIN/,copy-session.sh"
 install -m 0755 egress-proxy.py "$BIN/,egress-proxy.py"
 

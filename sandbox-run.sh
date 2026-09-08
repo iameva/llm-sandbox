@@ -16,7 +16,15 @@
 # anything fails:
 #     SANDBOX_ISOLATION=vm ,claude-sandbox.sh --check
 #
+# Backend options (before harness arguments):
+#   --backend NAME   Choose a profile from backends.json or a built-in profile.
+#   --model MODEL    Override the profile model for this launch.
+# Sessions remain in the harness directory when the backend changes.
+#
 # Environment:
+#   SANDBOX_BACKEND   Default backend for this invocation
+#   SANDBOX_MODEL     Model override for this invocation
+#   SANDBOX_BACKENDS_FILE  Alternate host path to backends.json
 #   SANDBOX_ISOLATION   container (default) | gvisor | vm
 #                       gvisor needs a hand-installed runsc; vm needs
 #                       crun-krun and /dev/kvm, and is currently broken
@@ -29,8 +37,8 @@
 #                       Empty means call runsc directly.
 #   SANDBOX_KRUN        path to krun, if it is not on PATH
 #   SANDBOX_PROXY       host:port of the egress proxy. When set, the
-#                       sandbox gets no DNS and must reach the network
-#                       through this proxy. Unset means unrestricted.
+#                       sandbox gets proxy variables for cooperating clients.
+#                       This does not block direct network connections.
 #                       A loopback address gets a pasta port forward, so
 #                       the proxy can stay bound to host loopback.
 #   SANDBOX_PASTA_FORWARD  0 to suppress that forward.
@@ -125,6 +133,12 @@ CLAUDE_CONFIG_IN_DIR="${SANDBOX_CLAUDE_CONFIG_DIR:-1}"
 
 die() { echo "sandbox-run: $*" >&2; exit 1; }
 
+# Rootless systemd scopes do not provide a verified egress boundary here.
+# Reject the request before creating configuration or starting a container.
+if [[ "${SANDBOX_CONFINE:-0}" != "0" ]]; then
+    die "SANDBOX_CONFINE is unsupported: rootless scope filtering cannot be verified. No container was started. Unset it only if advisory proxying is acceptable."
+fi
+
 # ---------------------------------------------------------------------
 # Agent name
 # ---------------------------------------------------------------------
@@ -149,6 +163,31 @@ if [[ -z "$AGENT" ]]; then
     AGENT="$1"
     shift
 fi
+
+# The legacy entry point is an alias, not a separate harness or session store.
+BACKEND="${SANDBOX_BACKEND:-}"
+MODEL_OVERRIDE="${SANDBOX_MODEL:-}"
+if [[ "$AGENT" == "deepseek-claude" ]]; then
+    AGENT=claude
+    BACKEND="${BACKEND:-deepseek}"
+fi
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --backend|--model)
+            [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || die "$1 requires a value"
+            if [[ "$1" == "--backend" ]]; then BACKEND="$2"; else MODEL_OVERRIDE="$2"; fi
+            shift 2 ;;
+        --backend=*)
+            BACKEND="${1#*=}"
+            [[ -n "$BACKEND" ]] || die "--backend requires a value"
+            shift ;;
+        --model=*)
+            MODEL_OVERRIDE="${1#*=}"
+            [[ -n "$MODEL_OVERRIDE" ]] || die "--model requires a value"
+            shift ;;
+        *) break ;;
+    esac
+done
 
 # ---------------------------------------------------------------------
 # Per-agent configuration
@@ -238,8 +277,14 @@ configure_agent() {
         CMD=(claude --dangerously-skip-permissions)
         ;;
     codex)
+        # Not ~/.codex. That directory is codex's install root as well as
+        # its CODEX_HOME, so mounting over it hides the binary and the
+        # container fails to start. The image sets
+        # CODEX_HOME=~/.config/codex to separate the two; see the
+        # Containerfile. The host directory is unchanged, so existing
+        # credentials carry over.
         MOUNTS=(
-            "codex:${HOME_IN_SANDBOX}/.codex"
+            "codex:${HOME_IN_SANDBOX}/.config/codex"
             "orca:${HOME_IN_SANDBOX}/.orca"
         )
         CMD=(codex --dangerously-bypass-approvals-and-sandbox)
@@ -262,7 +307,7 @@ configure_agent() {
             "local-opencode:${HOME_IN_SANDBOX}/.local/share/opencode"
         )
         ENVS=("TODO_USER=${TODO_USER:-${USER:-appuser}}")
-        CMD=("${HOME_IN_SANDBOX}/.opencode/bin/opencode")
+        CMD=(opencode)
         ;;
     llm)
         # Interactive shell. Mounts no credentials by default: this used
@@ -282,8 +327,9 @@ configure_agent() {
                 claude)
                     claude_config_mounts claude .claude.json ;;
                 codex)
+                    # ~/.config/codex, not ~/.codex; see the codex branch.
                     MOUNTS+=(
-                        "codex:${HOME_IN_SANDBOX}/.codex"
+                        "codex:${HOME_IN_SANDBOX}/.config/codex"
                         "orca:${HOME_IN_SANDBOX}/.orca"
                     ) ;;
                 opencode)
@@ -297,38 +343,52 @@ configure_agent() {
         done
         CMD=(zsh)
         ;;
-    deepseek-claude)
-        # Claude Code pointed at DeepSeek's Anthropic-compatible API.
-        # Separate config dir so a third-party endpoint never touches
-        # Anthropic-authenticated state.
-        local key_file="${HOME}/.config/deepseek.api"
-        [[ -r "$key_file" ]] || die "missing DeepSeek key at $key_file"
-
-        # Its config file already sits inside its config directory, so
-        # the legacy path and the CLAUDE_CONFIG_DIR path are the same
-        # file. Nothing to copy; only the mount shape changes.
-        MOUNTS=()
-        claude_config_mounts deepseek-claude deepseek-claude/.claude.json
-
-        ENVS=(
-            "ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic"
-            "ANTHROPIC_AUTH_TOKEN=$(<"$key_file")"
-            "ANTHROPIC_MODEL=deepseek-v4-pro[1m]"
-            "ANTHROPIC_DEFAULT_OPUS_MODEL=deepseek-v4-pro[1m]"
-            "ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek-v4-pro[1m]"
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-flash"
-            "CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-flash"
-            "CLAUDE_CODE_EFFORT_LEVEL=max"
-        )
-        CMD=(claude --dangerously-skip-permissions)
-        ;;
     *)
         die "unknown agent: $1"
         ;;
     esac
 }
 
+# Resolve the profile before creating mounts. The helper emits NUL-delimited
+# records, never shell code. A private temporary file preserves its exit status.
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+backend_helper="$script_dir/backend-config.py"
+[[ -f "$backend_helper" ]] || backend_helper="$ROOT/backend-config.py"
+[[ -f "$backend_helper" ]] || die "backend-config.py is missing; rerun install.sh"
+backend_command=(python3 "$backend_helper" --harness "$AGENT"
+                 --backend "$BACKEND" --model "$MODEL_OVERRIDE")
+if [[ -n "${SANDBOX_BACKENDS_FILE:-}" ]]; then
+    [[ -f "$SANDBOX_BACKENDS_FILE" ]] || die "SANDBOX_BACKENDS_FILE does not exist"
+    backend_command+=(--config "$SANDBOX_BACKENDS_FILE")
+fi
+[[ "$DRY_RUN" != "1" ]] || backend_command+=(--dry-run)
+backend_plan="$(mktemp)"
+trap 'rm -f -- "$backend_plan"' EXIT
+if ! "${backend_command[@]}" > "$backend_plan"; then
+    rm -f -- "$backend_plan"
+    exit 1
+fi
+mapfile -d '' -t backend_records < "$backend_plan"
+rm -f -- "$backend_plan"
+trap - EXIT
+
 configure_agent "$AGENT"
+BACKEND_ASSETS=()
+for ((i=0; i<${#backend_records[@]}; i+=2)); do
+    value="${backend_records[i+1]}"
+    case "${backend_records[i]}" in
+        arg) CMD+=("$value") ;;
+        env) ENVS+=("$value") ;;
+        secret)
+            # Podman inherits only this named value. Neither argv nor dry-run
+            # output contains the key, and it is not persisted to agent config.
+            export "$value"
+            ENVS+=("${value%%=*}") ;;
+        asset) BACKEND_ASSETS+=("${backend_helper%/*}/$value:/opt/sandbox/$value") ;;
+        *) die "invalid backend helper output" ;;
+    esac
+done
+unset backend_records value
 
 # Everything below appends to ENVS, so it must stay after
 # configure_agent — that function assigns ENVS wholesale for some agents
@@ -339,7 +399,7 @@ configure_agent "$AGENT"
 ENVS+=("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1")
 
 # Set by claude_config_mounts. Kept out of configure_agent because the
-# deepseek-claude branch assigns ENVS wholesale and would drop it.
+# per-agent configuration may assign ENVS wholesale.
 if [[ "$WANT_CLAUDE_CONFIG_DIR" == "1" ]]; then
     ENVS+=("CLAUDE_CONFIG_DIR=${HOME_IN_SANDBOX}/.claude")
 fi
@@ -455,8 +515,7 @@ fi
 own_check() {
     dir="$1"
     label="$2"
-    probe="$dir/.sandbox-ownership-probe"
-    if ! touch "$probe" 2>/dev/null; then
+    if ! probe=$(mktemp "$dir/.sandbox-ownership-probe.XXXXXX" 2>/dev/null); then
         bad "$label" "cannot write $dir"
         return
     fi
@@ -505,42 +564,25 @@ if [ -n "${HTTPS_PROXY:-}" ]; then
     # the real allowlist gets learned. Reaching a denied host is then the
     # correct result, not a failure, and calling it one would train you
     # to ignore this line during the week that matters most.
-    code=$(probe_http https://example.com/)
-    case "$code" in
-        ""|000)
-            if [ "${PROXY_MODE:-enforce}" = "log" ]; then
-                bad "egress denied host" "refused, but log mode should allow everything — is the proxy really in log mode?"
-            else
-                say "egress denied host" "OK  refused"
-            fi
-            ;;
-        *)
-            if [ "${PROXY_MODE:-enforce}" = "log" ]; then
-                say "egress denied host" "OK  reachable, http $code — expected, log mode allows everything"
-            else
-                bad "egress denied host" "reachable, http $code — allowlist not enforced"
-            fi
-            ;;
-    esac
+    # Inspect the proxy's CONNECT response. HTTP 000 also covers DNS, TLS,
+    # and transport failures, so it cannot establish a policy refusal.
+    connect_code=$(curl -s -o /dev/null -w '%{http_connect}' --max-time 15 \
+        --proxy "$HTTPS_PROXY" --noproxy '' https://example.com/ 2>/dev/null || true)
+    if [ "${PROXY_MODE:-enforce}" = "log" ]; then
+        if [ "$connect_code" = "200" ]; then
+            say "egress denied host" "OK  CONNECT accepted, expected in log mode"
+        else
+            bad "egress denied host" "expected CONNECT 200 in log mode, got $connect_code"
+        fi
+    elif [ "$connect_code" = "403" ]; then
+        say "egress denied host" "OK  proxy explicitly refused CONNECT"
+    else
+        bad "egress denied host" "expected CONNECT 403, got $connect_code; refusal is not verified"
+    fi
 fi
 
-# The confinement test, and the only one that proves egress control is
-# more than an honour system.
-#
-# It must use a literal IP. With --dns=none there is no resolver, so a
-# hostname probe fails with "Could not resolve host" before any connect
-# is attempted — that measures DNS, not the filter, and reads as a pass.
-#
-# It must also drop the proxy environment, since the whole point is
-# whether a process that ignores HTTPS_PROXY can still get out.
-if [ "${CONFINED:-0}" = "1" ]; then
-    code=$(env -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy \
-        curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://1.1.1.1/ 2>/dev/null || true)
-    case "$code" in
-        ""|000) say "raw egress (confined)" "OK  refused — IPAddressDeny is holding" ;;
-        *)      bad "raw egress (confined)" "reached 1.1.1.1 directly, http $code — IPAddressDeny is NOT holding, egress control is advisory only" ;;
-    esac
-fi
+# HTTP failures cannot prove that direct connections are blocked.
+say "network policy" "ADVISORY  this runner does not enforce direct egress restrictions"
 
 echo
 [ "$fail" = 0 ] && echo "all checks passed" || echo "SOME CHECKS FAILED"
@@ -568,7 +610,6 @@ elif [[ "${SANDBOX_CHECK:-}" == "1" || "${1:-}" == "--check" ]]; then
     # The sandbox cannot tell whether the proxy is logging or enforcing,
     # and the two have opposite expectations for a denied host.
     ENVS+=("PROXY_MODE=${SANDBOX_PROXY_MODE:-enforce}")
-    ENVS+=("CONFINED=$([[ "${SANDBOX_CONFINE:-}" == "1" ]] && echo 1 || echo 0)")
     CMD=(zsh -c "$CHECK_SCRIPT")
     set --
 fi
@@ -808,12 +849,20 @@ fi
 
 argv+=(-v "$PWD:/workspace:${LABEL_MODE},rw")
 for m in "${MOUNTS[@]}"; do
+    source_path="$ROOT/${m%%:*}"
+    if [[ "$DRY_RUN" != "1" && ! -e "$source_path" ]]; then
+        mkdir -p -- "$source_path"
+        chmod 0700 -- "$source_path"
+    fi
     argv+=(-v "$ROOT/${m%%:*}:${m#*:}:${LABEL_MODE},rw")
+done
+for asset in "${BACKEND_ASSETS[@]}"; do
+    argv+=(-v "$asset:${LABEL_MODE},ro")
 done
 
 if [[ -n "$PROXY" ]]; then
-    # The proxy resolves hostnames on the sandbox's behalf, so the
-    # sandbox needs no resolver of its own. That closes DNS tunnelling.
+    # Cooperating clients let the proxy resolve hostnames. This option
+    # does not prevent direct DNS requests or connections to literal IPs.
     argv+=(--dns=none)
     ENVS+=(
         "HTTPS_PROXY=http://${PROXY}"
@@ -873,54 +922,11 @@ argv+=(--tmpfs /run:rw,size=16M
        "${CMD[@]}" "$@")
 
 # ---------------------------------------------------------------------
-# Network confinement
-#
-# The original plan was to filter a tap interface with nftables. That is
-# not available: libkrun uses transparent socket impersonation, so the
-# guest has only a dummy interface and no route, and the real sockets are
-# opened by the krun process on the host. There is no tap to filter.
-#
-# A systemd scope filters at the cgroup instead, via BPF on socket
-# operations. That catches the host-side krun process no matter how the
-# guest's networking is arranged, so it works under TSI and would work
-# just as well with a virtio-net device.
-# ---------------------------------------------------------------------
-
-if [[ "${SANDBOX_CONFINE:-}" == "1" ]]; then
-    [[ -n "$PROXY" ]] || die "SANDBOX_CONFINE=1 needs SANDBOX_PROXY; denying all addresses without a proxy leaves no network at all"
-    command -v systemd-run >/dev/null 2>&1 || die "SANDBOX_CONFINE=1 needs systemd-run"
-
-    proxy_addr="${PROXY%:*}"
-    [[ -n "$proxy_addr" ]] || die "cannot read an address out of SANDBOX_PROXY='$PROXY'"
-
-    # Measured 2026-08-06 on this host: IPAddressDeny had no effect on a
-    # rootless `systemd-run --user --scope`. --check reached 1.1.1.1
-    # directly with the proxy environment stripped. The properties are
-    # accepted without error and silently do nothing, which is the worst
-    # failure shape — it looks confined and is not.
-    #
-    # Left in place because it costs nothing and may work elsewhere, or
-    # after cgroup BPF delegation is sorted. Do not treat it as a control
-    # until `--check` reports "raw egress (confined) OK".
-    if [[ "${SANDBOX_CONFINE_ACK:-}" != "1" ]]; then
-        echo "sandbox-run: WARNING — SANDBOX_CONFINE was measured as a no-op on a rootless" >&2
-        echo "sandbox-run: user scope (2026-08-06). Confirm with --check before relying on it;" >&2
-        echo "sandbox-run: 'raw egress (confined) OK' is the only evidence that counts." >&2
-        echo "sandbox-run: Silence with SANDBOX_CONFINE_ACK=1." >&2
-    fi
-
-    argv=(systemd-run --user --scope --quiet --collect
-          -p IPAddressDeny=any
-          -p "IPAddressAllow=${proxy_addr}"
-          -- "${argv[@]}")
-fi
-
-# ---------------------------------------------------------------------
 # Proxy preflight
 #
-# Setting a proxy also sets --dns=none, so an agent launched against a
-# dead proxy has no working network at all. The failure then surfaces as
-# whatever that agent does when every API call times out, which is rarely
+# Setting a proxy directs cooperating clients to it. An agent launched
+# against a dead proxy cannot make its normal API calls. The failure
+# surfaces as whatever that agent does when every API call times out, rarely
 # "the proxy is not running". One TCP connect turns that into a sentence.
 #
 # It also protects the log-mode soak. A session that runs without the
@@ -934,7 +940,7 @@ fi
 if [[ -n "$PROXY" && "$DRY_RUN" != "1" && "${SANDBOX_PROXY_PREFLIGHT:-1}" == "1" ]]; then
     pf_host="${PROXY%:*}"
     pf_port="${PROXY##*:}"
-    pf_cmd=(bash -c "exec 3<>/dev/tcp/${pf_host}/${pf_port}")
+    pf_cmd=(bash -c 'exec 3<>"/dev/tcp/$1/$2"' sandbox-proxy-preflight "$pf_host" "$pf_port")
     if command -v timeout >/dev/null 2>&1; then
         pf_cmd=(timeout 2 "${pf_cmd[@]}")
     fi
@@ -944,8 +950,7 @@ if [[ -n "$PROXY" && "$DRY_RUN" != "1" && "${SANDBOX_PROXY_PREFLIGHT:-1}" == "1"
   Start it:   ,egress-proxy.py --mode log --listen $PROXY
   Check it:   ss -lntp | grep '$pf_port'
 
-A proxy also means --dns=none, so the sandbox would have no network at
-all. Skip this check with SANDBOX_PROXY_PREFLIGHT=0."
+Clients using this proxy would be unable to reach their APIs. Skip this check with SANDBOX_PROXY_PREFLIGHT=0."
     fi
 fi
 

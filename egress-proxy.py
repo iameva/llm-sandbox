@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Egress allowlist proxy for the LLM sandbox.
 
-Runs on the host. The sandbox reaches the network only through this
-process, and only for hostnames on the allowlist.
+Runs on the host and filters connections sent through it. Proxy variables
+are advisory: blocking direct sandbox connections requires a separate
+network boundary. In enforce mode, this proxy permits only listed hosts.
 
 Design notes:
 
@@ -11,8 +12,8 @@ Design notes:
   pinning keeps working and API traffic stays end-to-end encrypted.
 
 * The proxy resolves hostnames on the client's behalf, so the sandbox
-  needs no resolver of its own. Run the sandbox with --dns=none and DNS
-  tunnelling is closed.
+  needs no resolver for proxied connections. This does not block direct
+  DNS traffic from a process that ignores the proxy.
 
 * Plain HTTP proxying is refused. Everything the sandbox legitimately
   talks to is HTTPS, and refusing cleartext keeps one code path.
@@ -210,16 +211,10 @@ class Handler(socketserver.StreamRequestHandler):
                       host=host, port=port)
             return
 
-        if not allowed:
-            if self.server.mode == "enforce":
-                self.deny(403, "host not on allowlist", client=client,
-                          host=host, port=port)
-                return
-            log_event(self.server.log_path, decision="allow-unlisted",
-                      client=client, host=host, port=port)
-        else:
-            log_event(self.server.log_path, decision="allow",
-                      client=client, host=host, port=port)
+        if not allowed and self.server.mode == "enforce":
+            self.deny(403, "host not on allowlist", client=client,
+                      host=host, port=port)
+            return
 
         try:
             infos = resolve_public(host, port)
@@ -244,6 +239,8 @@ class Handler(socketserver.StreamRequestHandler):
                       host=host, port=port)
             return
 
+        log_event(self.server.log_path, decision="connected",
+                  client=client, host=host, port=port, listed=allowed)
         try:
             self.wfile.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             self.wfile.flush()
@@ -267,9 +264,9 @@ class ProxyServer(socketserver.ThreadingTCPServer):
 def summarize(log_path):
     """Print hosts seen in a log, as a file that is safe to use as-is.
 
-    Hosts that were reached are printed live. Hosts that were denied are
-    printed commented out, so piping this straight into an allowlist
-    cannot silently admit something the proxy previously refused.
+    Only successful upstream connections are printed live. Denials and
+    older allow/allow-unlisted events are commented out: those older
+    events were written before connection success was known.
     """
     reached = {}
     refused = {}
@@ -282,7 +279,7 @@ def summarize(log_path):
             host = event.get("host")
             if not host:
                 continue
-            bucket = reached if event.get("decision", "").startswith("allow") else refused
+            bucket = reached if event.get("decision") == "connected" else refused
             bucket[host] = bucket.get(host, 0) + 1
 
     def emit(mapping, prefix):
@@ -292,7 +289,7 @@ def summarize(log_path):
     print("# Hosts the sandbox reached. Review every line before use.")
     emit(reached, "")
     if refused:
-        print("\n# Denied by the proxy. Uncomment only if you mean to allow it.")
+        print("\n# Denied or unverified legacy attempts. Review before uncommenting.")
         emit(refused, "# ")
 
 
@@ -332,7 +329,7 @@ def main():
                  f"{allow_file or DEFAULT_ALLOW_FILE} is missing or has no hosts")
 
     bind_host, _, bind_port = args.listen.rpartition(":")
-    os.makedirs(os.path.dirname(args.log), exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(args.log)), exist_ok=True)
 
     server = ProxyServer((bind_host, int(bind_port)), Handler)
     server.mode = args.mode

@@ -1,0 +1,32 @@
+{
+  "defaults": {
+    "claude": "claude",
+    "codex": "chatgpt",
+    "pi": "chatgpt",
+    "omp": "chatgpt",
+    "opencode": "chatgpt",
+    "aider": "deepseek"
+  },
+  "profiles": {
+    "claude": {
+      "provider": "anthropic",
+      "auth": "login",
+      "model": "opus",
+      "fast_model": "haiku"
+    },
+    "chatgpt": {
+      "provider": "openai",
+      "auth": "login",
+      "model": "gpt-6-astra",
+      "fast_model": "gpt-5.6-luna"
+    },
+    "deepseek": {
+      "provider": "deepseek",
+      "auth": "api_key",
+      "model": "deepseek-v4-pro",
+      "fast_model": "deepseek-v4-flash",
+      "key_env": "DEEPSEEK_API_KEY",
+      "key_file": "~/.config/deepseek.api"
+    }
+  }
+}
