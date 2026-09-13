@@ -20,11 +20,11 @@ import time
 try:
     from .proxy_process import Processes
     from .runtime_support import (bounded_integer, disk_cache, private_directory,
-                                  write_size, read_report, finish_artifacts, prune_artifacts)
+                                  write_size, read_report, finish_artifacts, prune_artifacts, validate_base_image)
 except ImportError:
     from proxy_process import Processes
     from runtime_support import (bounded_integer, disk_cache, private_directory,
-                                 write_size, read_report, finish_artifacts, prune_artifacts)
+                                 write_size, read_report, finish_artifacts, prune_artifacts, validate_base_image)
 
 
 USER_DATA = """#!/bin/sh
@@ -160,6 +160,7 @@ def main():
     parser.add_argument('--env', action='append', default=[], help='guest NAME=value, or inherited NAME')
     parser.add_argument('--batch', action='store_true', help='noninteractive command; console goes to the run log')
     parser.add_argument('--verify', action='store_true', help='check this launch configuration inside the guest')
+    parser.add_argument('--verify-agents', action='store_true', help='also check all five installed agent versions')
     parser.add_argument('--command', nargs=argparse.REMAINDER, help='exact guest command and arguments')
     parser.add_argument('--memory-mib', type=bounded_integer(512, 1048576), default=2048)
     parser.add_argument('--cpus', type=bounded_integer(1, 1024), default=2)
@@ -172,16 +173,19 @@ def main():
                         default=Path(os.environ.get('XDG_CACHE_HOME', str(Path.home()/'.cache')))/'llm-sandbox/qemu')
     parser.add_argument('--keep-artifacts', action='store_true', help='retain bounded diagnostics, never the disposable disk')
     args = parser.parse_args()
+    args.verify = args.verify or args.verify_agents
     if os.geteuid() == 0:
         parser.error('run as your normal user, without sudo')
     try:
         cache = disk_cache(args.cache_dir)
         settings = launch_settings(args.mount, args.asset, args.env, args.command, args.verify)
+        settings['verify_agents'] = args.verify_agents
         disk = args.disk.resolve(strict=True)
         workspace = args.workspace.resolve(strict=True)
         allow = args.allow_file.resolve(strict=True)
         if not disk.is_file() or not workspace.is_dir() or not allow.is_file():
             raise ValueError('disk and allowlist must be files; workspace must be a directory')
+        validate_base_image(disk)
         if disk.is_relative_to(workspace):
             raise ValueError('the base image must be outside the shared workspace')
         if workspace == Path('/') or workspace == Path.home().resolve():

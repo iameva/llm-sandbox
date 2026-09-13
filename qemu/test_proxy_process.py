@@ -3,13 +3,17 @@ from pathlib import Path
 import socket
 import tempfile
 import unittest
-from process_lifecycle import Processes
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from qemu.proxy_process import Processes
 
 
 class LifecycleTest(unittest.TestCase):
     def test_crash_restart_keeps_other_proxy_running(self):
         with tempfile.TemporaryDirectory() as directory:
-            processes = Processes(Path(directory))
+            allow = Path(directory)/'allow.txt'
+            allow.write_text('example.com\n')
+            processes = Processes(Path(directory), allow)
             def denial(key):
                 with socket.create_connection(('127.0.0.1', processes.ports[key]), timeout=2) as client:
                     client.sendall(b'CONNECT denied.invalid:443 HTTP/1.1\r\n\r\n')
@@ -20,7 +24,8 @@ class LifecycleTest(unittest.TestCase):
                 denial('a')
                 denial('b')
                 port = processes.ports['a']
-                processes.kill('a')
+                processes.children['a'].kill()
+                processes.children['a'].wait(timeout=5)
                 with self.assertRaises(ConnectionRefusedError):
                     socket.create_connection(('127.0.0.1', port), timeout=2)
                 denial('b')

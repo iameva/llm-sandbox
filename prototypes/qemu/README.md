@@ -1,3 +1,8 @@
+For routine image updates, use the installed `,sandbox-image` command and
+the [image lifecycle](../../qemu/IMAGE_LIFECYCLE.md). It configures the source
+and active version, runs the builder, boot-checks candidates and supports
+rollback. The standalone commands below remain useful for development.
+
 The supported launcher runtime has moved to `../../qemu/`. The current resource,
 storage, terminal and retention settings are documented in the root README.
 The older experiments below describe their original behavior; their `-snapshot`
@@ -565,3 +570,10 @@ and 35.4 ms for auto, about 2.43 times faster in this 500-file fixture.
 The runs were sequential, not a controlled cache-coherence stress test.
 Normal launchers retain cache=never. Long batch runs, real-agent concurrent
 state updates and credential refresh remain separate acceptance items.
+
+Runtime unit tests have moved to ../../qemu/. Run them with
+`python3 -m unittest discover -s qemu` from the repository root. Tests specific
+to this acceptance harness and the experimental crash helpers stay here.
+The supported launcher and acceptance tool now reject writable base images;
+use the read-only agents.qcow2 published by the image builder. Historical
+building.qcow2 results above describe the manually recovered development image.

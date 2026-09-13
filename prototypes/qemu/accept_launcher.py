@@ -20,7 +20,7 @@ import threading
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from qemu.runtime_support import disk_cache, private_directory
+from qemu.runtime_support import disk_cache, private_directory, validate_base_image
 
 GUEST = r"""
 import json, os, pathlib, socket, sqlite3, sys, time
@@ -148,6 +148,10 @@ def main():
     if os.geteuid() == 0:
         parser.error('run without sudo')
     disk = args.disk.resolve(strict=True)
+    try:
+        validate_base_image(disk)
+    except ValueError as exc:
+        parser.error(str(exc))
     repo = Path(__file__).resolve().parents[2]
     cache = disk_cache(Path.home()/'.cache/llm-sandbox/qemu-acceptance')
     private_directory(cache)

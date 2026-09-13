@@ -621,12 +621,16 @@ fi
 if [[ "$ISOLATION" == "qemu" ]]; then
     [[ "$AGENT" != "aider" ]] || die "the QEMU image does not include aider"
     [[ "$CLAUDE_CONFIG_IN_DIR" == "1" ]] || die "QEMU requires SANDBOX_CLAUDE_CONFIG_DIR=1"
-    [[ -n "${SANDBOX_QEMU_DISK:-}" ]] || die "set SANDBOX_QEMU_DISK to the built agent qcow2 image"
     qemu_runner="$script_dir/qemu/sandbox.py"
     [[ -f "$qemu_runner" ]] || qemu_runner="$ROOT/qemu/sandbox.py"
     [[ -f "$qemu_runner" ]] || die "QEMU launcher is missing; rerun install.sh"
+    qemu_disk="${SANDBOX_QEMU_DISK:-}"
+    if [[ -z "$qemu_disk" ]]; then
+        qemu_config="${SANDBOX_QEMU_CONFIG:-$ROOT/qemu.json}"
+        qemu_disk=$(python3 "${qemu_runner%/*}/images.py" --config "$qemu_config" path) || exit 1
+    fi
     qemu_allow="${SANDBOX_ALLOW_FILE:-$ROOT/egress-allowlist.txt}"
-    qargv=(python3 "$qemu_runner" --disk "$SANDBOX_QEMU_DISK"
+    qargv=(python3 "$qemu_runner" --disk "$qemu_disk"
            --workspace "$PWD" --allow-file "$qemu_allow")
     [[ "${SANDBOX_BATCH:-0}" != "1" ]] || qargv+=(--batch)
     for setting in MEMORY_MIB CPUS BOOT_TIMEOUT BATCH_TIMEOUT IDLE_TIMEOUT CACHE_DIR; do

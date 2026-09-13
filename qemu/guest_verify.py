@@ -5,6 +5,7 @@ from pathlib import Path
 import socket
 import sqlite3
 import tempfile
+import subprocess
 
 
 def sqlite_wal_works(directory):
@@ -29,8 +30,24 @@ def sqlite_wal_works(directory):
             writer.close()
 
 
-def verify(mounts, sqlite_home):
-    checks = {'uid_1000': os.getuid() == 1000}
+def agent_versions(environment):
+    checks = {}
+    versions = {}
+    for agent in ('claude', 'codex', 'pi', 'omp', 'opencode'):
+        try:
+            result = subprocess.run([agent, '--version'], env=environment, stdin=subprocess.DEVNULL,
+                                    capture_output=True, text=True, timeout=60, check=True)
+            versions[agent] = result.stdout.strip()
+            checks[agent+'_version'] = bool(versions[agent])
+        except (OSError, subprocess.SubprocessError) as exc:
+            checks[agent+'_version'] = False
+            print(f'{agent} version check failed: {exc}', flush=True)
+    return checks, versions
+
+
+def verify(mounts, sqlite_home, environment=None, agents=False):
+    checks, versions = agent_versions(environment) if agents else ({}, {})
+    checks['uid_1000'] = os.getuid() == 1000
     try:
         checks['codex_sqlite_wal'] = sqlite_wal_works(sqlite_home)
     except (OSError, sqlite3.Error):
@@ -54,6 +71,7 @@ def verify(mounts, sqlite_home):
         checks['writable:'+target] = os.access(target, os.W_OK)
     (Path('/mnt/report')/'verify.json').write_text(json.dumps({
         'checks': checks,
+        'versions': versions,
         'limits': 'Direct TCP failures are smoke checks, not proof of complete isolation; run the host boundary suite.',
     }, indent=2))
     return 0 if all(checks.values()) else 1

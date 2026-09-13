@@ -1,5 +1,6 @@
 """Test real launcher dispatch without starting a VM."""
 import os
+import json
 from pathlib import Path
 import shlex
 import subprocess
@@ -68,3 +69,28 @@ class QemuRunnerTests(RunnerFixture):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('SANDBOX_QEMU_DISK', result.stderr)
         self.assertFalse(self.capture.exists())
+
+    def test_configured_image_and_explicit_override(self):
+        image = self.home/'agents.qcow2'
+        image.write_bytes(b'test image; no VM is started')
+        image.chmod(0o400)
+        config = self.home/'.config/llm-sandbox/qemu.json'
+        config.write_text(json.dumps({'version': 1, 'active_image': str(image)}))
+        result = self.launch('codex', SANDBOX_ISOLATION='qemu', SANDBOX_DRY_RUN='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = shlex.split(result.stdout)
+        self.assertEqual(argv[argv.index('--disk')+1], str(image))
+        override = self.qemu('codex')
+        argv = shlex.split(override.stdout)
+        self.assertEqual(argv[argv.index('--disk')+1], '/images/agents.qcow2')
+
+    def test_installed_manager_and_builder_and_config_survive_reinstall(self):
+        config = self.home/'.config/llm-sandbox/qemu.json'
+        config.write_text('{"version": 1}')
+        subprocess.run(['sh', 'install.sh'], cwd=REPO, env=self.env, check=True, capture_output=True)
+        self.assertEqual(config.read_text(), '{"version": 1}')
+        manager = self.home/'.local/bin/,sandbox-image'
+        for command in ([str(manager), 'status'],
+                        ['python3', str(self.home/'.config/llm-sandbox/qemu/build_image.py'), '--help']):
+            result = subprocess.run(command, cwd=self.home, env=self.env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)

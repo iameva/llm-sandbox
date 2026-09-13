@@ -3,9 +3,9 @@ import fcntl
 import json
 import os
 from pathlib import Path
-import re
 import shutil
 import stat
+import subprocess
 import tempfile
 import time
 
@@ -24,17 +24,23 @@ def disk_cache(path):
     ancestor = path
     while not ancestor.exists():
         ancestor = ancestor.parent
-    mounts = []
-    for line in Path('/proc/self/mountinfo').read_text().splitlines():
-        before, after = line.split(' - ', 1)
-        mount = Path(re.sub(r'\\([0-7]{3})', lambda m: chr(int(m[1], 8)), before.split()[4]))
-        if ancestor.is_relative_to(mount):
-            mounts.append((len(mount.parts), after.split()[0]))
-    if not mounts or max(mounts)[1] in ('tmpfs', 'ramfs'):
+    # Query the effective filesystem through statfs, including overmounts.
+    # Sorting mountinfo entries cannot determine which ancestors are hidden.
+    try:
+        filesystem = subprocess.run(['stat', '--file-system', '--format=%T', '--', str(ancestor)],
+                                    check=True, capture_output=True, text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError(f'cannot determine cache filesystem: {exc}') from exc
+    if not filesystem or filesystem in ('tmpfs', 'ramfs'):
         raise ValueError('QEMU cache must be on a disk-backed filesystem, not tmpfs or ramfs')
     if ',' in str(path):
         raise ValueError('QEMU cache path must not contain commas')
     return path
+
+
+def validate_base_image(path):
+    if path.stat().st_mode & 0o222:
+        raise ValueError('base image must be read-only; use the published agents.qcow2')
 
 
 def private_directory(path):

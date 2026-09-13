@@ -15,8 +15,11 @@ import subprocess
 import tempfile
 import time
 
-from sandbox import USER_DATA, qemu_command
-from process_lifecycle import Processes
+from sandbox import USER_DATA, qemu_command, check_helpers
+try:
+    from proxy_process import Processes
+except ImportError:
+    from qemu.proxy_process import Processes
 from build_support import BuildMonitor, read_report
 
 
@@ -49,6 +52,8 @@ def main():
     parser.add_argument('--parent', type=Path, default=Path.home())
     parser.add_argument('--allow-downloads', action='store_true')
     parser.add_argument('--check', action='store_true')
+    parser.add_argument('--result-file', type=Path,
+                        help='write the published image path as JSON for the image manager')
     parser.add_argument('--virtiofsd', default=shutil.which('virtiofsd') or '/usr/libexec/virtiofsd')
     args = parser.parse_args()
     if os.geteuid() == 0:
@@ -74,6 +79,8 @@ def main():
             raise ValueError('KVM access required')
         if shutil.disk_usage(parent).free < 12 * 1024**3:
             raise ValueError('at least 12 GiB free space required')
+        if args.result_file and (args.result_file.exists() or args.result_file.is_symlink()):
+            raise ValueError('result file already exists')
     except (ValueError, OSError) as exc:
         parser.error(str(exc))
     if args.check:
@@ -83,6 +90,7 @@ def main():
         parser.error('building requires --allow-downloads (public HTTPS; no credentials or project)')
     base = Path(tempfile.mkdtemp(prefix='qemu-agents-', dir=parent))
     share = Path(tempfile.mkdtemp(prefix='qemu-build-report-'))
+    transport = Path(tempfile.mkdtemp(prefix='qemu-build-sockets-'))
     source = base/'seed'
     source.mkdir(mode=0o700)
     children, logs = [], []
@@ -93,7 +101,9 @@ def main():
         image = base/'building.qcow2'
         subprocess.run([image_tool, 'convert', '-f', 'qcow2', '-O', 'qcow2',
                         str(disk), str(image)], check=True, timeout=600)
-        proxy = Processes(base, mode='log')
+        build_allow = base/'build-allowlist.txt'
+        build_allow.write_text('example.com\n')
+        proxy = Processes(base, allow_file=build_allow, mode='log')
         proxy.start('build')
         script = build_script()
         files = {'user-data': script, 'meta-data': f'instance-id: {base.name}\n',
@@ -105,7 +115,7 @@ def main():
         subprocess.run([maker, '-quiet', '-output', str(seed), '-volid', 'cidata',
                         '-joliet', '-rock', *files, 'provision_agents.py'], cwd=source,
                        check=True, timeout=60)
-        fs = base/'vhost.sock'
+        fs = transport/'vhost.sock'
         log = (base/'virtiofsd.log').open('w')
         logs.append(log)
         daemon = subprocess.Popen([args.virtiofsd, '--socket-path', str(fs), '--shared-dir', str(share),
@@ -129,8 +139,7 @@ def main():
         monitor = BuildMonitor(base, share)
         while vm.poll() is None:
             monitor.poll()
-            if daemon.poll() is not None or proxy.children['build'].poll() is not None:
-                raise RuntimeError('build helper exited')
+            check_helpers(vm, [daemon, proxy.children['build']])
             time.sleep(.5)
         report = read_report(share/'build-result.json')
         if report is None:
@@ -154,9 +163,12 @@ def main():
             image.rename(base/'building.qcow2')
             raise
         print(f'Agent image ready: {image}\nVersions: {report["versions"]}', flush=True)
+        if args.result_file:
+            with args.result_file.open('x') as result:
+                json.dump({'image': str(image), 'manifest': str(base/'manifest.json')}, result)
         return 0
     except (Exception, KeyboardInterrupt) as exc:
-        print(f'Build incomplete: {exc}\nInspect {base}; no image is marked ready.', flush=True)
+        print(f'Build incomplete: {exc}\nInspect {base} before using any image from this run.', flush=True)
         return 2
     finally:
         for child in reversed(children):
@@ -177,6 +189,7 @@ def main():
                     print(f'Could not copy {name}: {exc}; original remains at {share}', flush=True)
         for log in logs:
             log.close()
+        shutil.rmtree(transport)
 
 
 if __name__ == '__main__':

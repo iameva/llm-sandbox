@@ -228,15 +228,32 @@ Inspect the generated browser screenshots for missing glyphs. The default image 
 
 QEMU is available as an opt-in isolation mode for Claude, Codex, Pi, OMP,
 OpenCode and the agent shell. Install the launcher files with the existing
-installer, then select the already built five-agent disk:
+installer. The image manager records the selected version in
+`~/.config/llm-sandbox/qemu.json` and checks each update before selecting it.
+The builder publishes a read-only `agents.qcow2` after its structure check,
+SHA-256 digest and manifest.
+The launcher rejects any base image with owner, group or other write permission;
+it does not rehash the image on every launch. File permissions prevent accidental
+writes, but do not prove provenance or stop the owner from changing permissions.
 
 ```sh
 sh install.sh
+,sandbox-image configure --source-disk /path/to/verified-fedora-44-cloud.qcow2
+,sandbox-image update --check
+,sandbox-image update --allow-downloads
+unset SANDBOX_QEMU_DISK
 export SANDBOX_ISOLATION=qemu
-export SANDBOX_QEMU_DISK=/var/home/duve/qemu-agents-gtxjsoe5/building.qcow2
 export SANDBOX_ALLOW_FILE="$PWD/egress-allowlist.txt"
 ,codex-sandbox.sh
 ```
+
+The source path above is a placeholder. If you already have a published
+image, use `,sandbox-image activate /path/to/agents.qcow2` instead of building.
+For the recovered `building.qcow2`, use `,sandbox-image adopt PATH`; it checks
+and publishes a copy without rebuilding. See the [image lifecycle](qemu/IMAGE_LIFECYCLE.md)
+for that exact command, configuration, updates, staged activation and rollback.
+Updates affect future launches; running VMs retain their original base.
+`SANDBOX_QEMU_DISK` remains an explicit override of the configured selection.
 
 The current directory becomes /workspace. The same backend/model arguments
 and per-agent directories under ~/.config/llm-sandbox are used as by the
@@ -262,8 +279,9 @@ shared Codex files have not been validated. Remove any explicit `sqlite_home`
 setting in Codex config, which otherwise overrides this environment variable.
 
 No Podman, pasta, host firewall changes, or sudo are used by QEMU launches.
-QEMU, virtiofsd, KVM access and an ISO maker must be installed already.
-The image is built separately with prototypes/qemu/build_image.py; launchers
+QEMU, qemu-img, virtiofsd, GNU stat (coreutils), KVM access and an ISO maker
+must be installed already.
+The image manager installs and runs the separate builder; launchers
 never download or build an image implicitly. Rebuild to add tools to the
 shared base image. Aider is not in the five-agent image and is rejected.
 
@@ -283,7 +301,7 @@ Before making QEMU your default, run the new installed-launcher acceptance:
 
 ```sh
 python3 prototypes/qemu/accept_launcher.py \
-  --disk /var/home/duve/qemu-agents-gtxjsoe5/building.qcow2
+  --disk "$(,sandbox-image path)"
 ```
 
 It uses a fresh temporary home, project and Codex state, installs only into
@@ -309,6 +327,8 @@ Reinstall with `sh install.sh` after runtime changes. No image rebuild is needed
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
+| `SANDBOX_QEMU_CONFIG` | `~/.config/llm-sandbox/qemu.json` | Image source, store and active/previous versions |
+| `SANDBOX_QEMU_DISK` | Configured active image | Explicit base image override |
 | `SANDBOX_QEMU_MEMORY_MIB` | `2048` | Guest RAM in MiB (512–1048576) |
 | `SANDBOX_QEMU_CPUS` | `2` | Guest vCPUs (1–1024) |
 | `SANDBOX_QEMU_BOOT_TIMEOUT` | `600` | Seconds to guest readiness |
@@ -335,8 +355,8 @@ are private to the host user. SIGKILL or host failure can leave incomplete run
 artifacts; these are not automatically deleted because child processes may
 still be using them.
 
-Terminal dimensions are applied before the agent starts and updated after
-host resizes. The size record carries only rows and columns; there is no
+Terminal dimensions are applied before the agent starts and checked once per
+second for host resizes. Pixel dimensions are ignored when comparing row/column sizes. The size record carries only rows and columns; there is no
 additional network channel. Established tunnels have no idle deadline by
 default; initial proxy connections still have bounded timeouts.
 
@@ -358,3 +378,34 @@ credentials, public downloads or real workspace exports. Acceptance artifacts
 are retained under `~/.cache/llm-sandbox/qemu-acceptance` for manual review.
 Add `--long-batch-seconds 960` to test a batch command beyond the old fifteen-minute
 limit; this deliberately adds sixteen minutes to the run.
+
+### QEMU tests and unattended runs
+
+Runtime coverage lives with the supported code and runs independently of
+`prototypes/`:
+
+```sh
+python3 -m unittest discover -s qemu
+python3 -m unittest discover -s tests
+python3 -m unittest discover -s prototypes/qemu
+```
+
+The last command covers image preparation, experimental boundary fixtures,
+compatibility entry points and the acceptance harness.
+
+An unlimited batch command can stay alive after readiness if an agent waits
+for input or a tool hangs. For unattended work, choose a finite deadline, for
+example one hour after readiness:
+
+```sh
+SANDBOX_BATCH=1 SANDBOX_QEMU_BATCH_TIMEOUT=3600 ,codex-sandbox.sh exec 'your task'
+```
+
+The separate boot deadline still applies before readiness. Ordinary batch
+runs remain unlimited by default; interactive sessions have no command deadline.
+
+For the manually recovered image used during development, a successful
+`qemu-img check` was reported, but the build did not publish a final manifest.
+It is no longer a quickstart example. If retaining that recovered base, stop
+its VMs, verify the image, and remove its write permissions before launching
+again. Making it read-only does not retroactively complete image publication.

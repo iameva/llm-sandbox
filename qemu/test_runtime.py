@@ -16,37 +16,14 @@ import time
 import unittest
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from qemu.runtime_support import disk_cache, finish_artifacts, prune_artifacts, write_size
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from qemu.runtime_support import disk_cache, finish_artifacts, prune_artifacts, write_size, validate_base_image
 from qemu.sandbox_guest import apply_terminal_size
 from qemu.network_relay import relay
 from qemu.sandbox import qemu_command, check_helpers
 
 
 class RuntimeTests(unittest.TestCase):
-    def test_serial_tty_does_not_select_batch_guest_for_resize_probe(self):
-        from accept_launcher import GUEST
-        # Execute the actual guest preflight, stopping before workspace and
-        # database setup. Both guests have a serial TTY; only A is selected.
-        preflight = compile(GUEST.split("share = pathlib.Path('/workspace')", 1)[0],
-                            'guest-preflight', 'exec')
-        for key, flags in [('a', []), ('b', []), ('a', ['--terminal-probe'])]:
-            with self.subTest(key=key, flags=flags):
-                scope = {}
-                with patch.object(sys, 'argv', ['probe.py', key, '0', *flags]), \
-                     patch.object(os, 'isatty', return_value=True), \
-                     patch.object(os, 'get_terminal_size', side_effect=[(100, 30), (132, 44), (132, 44)]) as size, \
-                     patch.object(Path, 'write_text') as write_marker:
-                    exec(preflight, scope)
-                if flags:
-                    self.assertEqual(scope['terminal_checks'], {
-                        'initial_terminal_size': True, 'live_terminal_resize': True})
-                    write_marker.assert_called_once_with('ready')
-                else:
-                    self.assertEqual(scope['terminal_checks'], {})
-                    size.assert_not_called()
-                    write_marker.assert_not_called()
-
     def test_helper_exit_before_qemu_exit_preserves_qemu_status(self):
         for status in (0, 3):
             with self.subTest(status=status):
@@ -75,23 +52,6 @@ class RuntimeTests(unittest.TestCase):
             vm.kill()
             vm.wait(timeout=5)
 
-    def test_acceptance_diagnostics_are_bounded_and_do_not_follow_links(self):
-        from accept_launcher import collect_diagnostics
-        with tempfile.TemporaryDirectory() as directory:
-            base = Path(directory)
-            (base/'canary').write_text('must not be read')
-            (base/'a.log').symlink_to(base/'canary')
-            (base/'b.log').write_text('x'*10000+'failure details')
-            run = base/'runs/run-example'
-            run.mkdir(parents=True)
-            (run/'exit.json').write_text('{"returncode": 0}')
-            os.mkfifo(run/'console.log')
-            result = collect_diagnostics(base)
-            self.assertNotIn('must not be read', json.dumps(result))
-            self.assertEqual(len(result['b.log']), 8192)
-            self.assertTrue(result['b.log'].endswith('failure details'))
-            self.assertIn('runs/run-example/exit.json', result)
-            self.assertNotIn('runs/run-example/console.log', result)
 
     def test_memory_configuration_matches_shared_memory_object(self):
         argv = qemu_command('qemu', '/disk', '/seed', '/sock', 1234, 4096, 4)
@@ -117,10 +77,47 @@ class RuntimeTests(unittest.TestCase):
             report = json.loads((Path(directory)/'exit.json').read_text())
             self.assertEqual(report, {'returncode': 2, 'error': 'RuntimeError: mount failed'})
 
-    def test_tmpfs_cache_is_rejected(self):
-        with patch.object(Path, 'read_text', return_value='1 0 0:1 / / rw - tmpfs tmpfs rw\n'):
-            with self.assertRaisesRegex(ValueError, 'disk-backed'):
+    def test_effective_cache_filesystem_is_checked_without_mount_order_assumptions(self):
+        for filesystem in ('tmpfs', 'ramfs', 'xfs', 'ext4'):
+            with self.subTest(filesystem=filesystem), tempfile.TemporaryDirectory() as directory:
+                cache = Path(directory)/'new-cache'
+                response = subprocess.CompletedProcess([], 0, filesystem+'\n', '')
+                with patch('qemu.runtime_support.subprocess.run', return_value=response) as query:
+                    if filesystem in ('tmpfs', 'ramfs'):
+                        with self.assertRaisesRegex(ValueError, 'disk-backed'):
+                            disk_cache(cache)
+                    else:
+                        self.assertEqual(disk_cache(cache), cache.resolve())
+                self.assertEqual(query.call_args.args[0],
+                                 ['stat', '--file-system', '--format=%T', '--', directory])
+                self.assertFalse(cache.exists())
+
+    def test_cache_filesystem_query_failure_is_rejected(self):
+        with patch('qemu.runtime_support.subprocess.run', side_effect=FileNotFoundError('stat missing')):
+            with self.assertRaisesRegex(ValueError, 'cannot determine cache filesystem'):
                 disk_cache(Path('/tmp'))
+
+    def test_base_image_rejects_any_write_permission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            disk = Path(directory)/'image.qcow2'
+            disk.touch()
+            for mode in (0o600, 0o420, 0o402):
+                disk.chmod(mode)
+                with self.subTest(mode=oct(mode)), self.assertRaisesRegex(ValueError, 'read-only'):
+                    validate_base_image(disk)
+            disk.chmod(0o400)
+            validate_base_image(disk)
+            self.assertEqual(disk.stat().st_mode & 0o777, 0o400)
+
+    def test_terminal_pixel_fields_do_not_trigger_a_resize(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory)
+            write_size(report, (100, 30))
+            current = struct.pack('HHHH', 30, 100, 1920, 1080)
+            with patch.object(os, 'isatty', return_value=True), \
+                 patch.object(fcntl, 'ioctl', return_value=current) as ioctl:
+                apply_terminal_size(0, report/'terminal.json')
+            ioctl.assert_called_once_with(0, termios.TIOCGWINSZ, b'\0'*8)
 
     def test_terminal_sizes_and_malformed_updates(self):
         master, slave = os.openpty()
@@ -227,6 +224,7 @@ class RuntimeTests(unittest.TestCase):
                 root = Path(directory)
                 disk = root/'base.qcow2'
                 disk.write_bytes(b'unchanged base')
+                disk.chmod(0o400)
                 workspace = root/'workspace'
                 workspace.mkdir()
                 allow = root/'allow.txt'

@@ -27,7 +27,7 @@ def apply_terminal_size(fd=0, report=Path('/mnt/report/terminal.json')):
         if type(rows) is not int or type(columns) is not int or not (1 <= rows <= 10000 and 1 <= columns <= 10000):
             return
         desired = struct.pack('HHHH', rows, columns, 0, 0)
-        if fcntl.ioctl(fd, termios.TIOCGWINSZ, b'\0'*8) != desired:
+        if fcntl.ioctl(fd, termios.TIOCGWINSZ, b'\0'*8)[:4] != desired[:4]:
             # The tty driver sends SIGWINCH to its foreground process group.
             fcntl.ioctl(fd, termios.TIOCSWINSZ, desired)
     except (OSError, ValueError, KeyError, TypeError):
@@ -98,14 +98,14 @@ def session():
           flush=True)
     if config.get('verify'):
         from guest_verify import verify
-        return verify(mounts, sqlite_home)
+        return verify(mounts, sqlite_home, environment, config.get('verify_agents', False))
     command = config.get('command')
     if not command:
         command = ['bash', '--noprofile', '--norc', '-i'] if config['agent'] == 'shell' else [config['agent']]
     child = subprocess.Popen(command, env=environment)
     while child.poll() is None:
+        time.sleep(1)
         apply_terminal_size()
-        time.sleep(.2)
     return child.returncode
 
 

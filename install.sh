@@ -42,7 +42,15 @@ install -m 0644 egress-allowlist.txt "$ALLOW"
 
 # Keep the QEMU runtime beside its dependencies; no VMs or images are built.
 mkdir -p "$CONF/qemu"
-for file in sandbox.py sandbox_guest.py network_relay.py proxy_process.py guest_verify.py runtime_support.py; do
+for file in sandbox.py sandbox_guest.py network_relay.py proxy_process.py guest_verify.py runtime_support.py images.py; do
     install -m 0644 "qemu/$file" "$CONF/qemu/$file"
 done
+for file in build_image.py build_support.py provision_agents.py; do
+    install -m 0644 "prototypes/qemu/$file" "$CONF/qemu/$file"
+done
 install -m 0644 egress-proxy.py "$CONF/qemu/egress-proxy.py"
+cat > "$BIN/,sandbox-image" <<'SH'
+#!/bin/sh
+exec python3 "$HOME/.config/llm-sandbox/qemu/images.py" "$@"
+SH
+chmod 0755 "$BIN/,sandbox-image"
