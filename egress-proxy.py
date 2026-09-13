@@ -51,6 +51,7 @@ import time
 CONNECT_TIMEOUT = 15
 IDLE_TIMEOUT = 300
 BUF = 65536
+NAT64_WELL_KNOWN = ipaddress.ip_network("64:ff9b::/96")
 
 CONFIG_DIR = os.path.expanduser("~/.config/llm-sandbox")
 DEFAULT_ALLOW_FILE = os.path.join(CONFIG_DIR, "egress-allowlist.txt")
@@ -115,14 +116,8 @@ def resolve_public(host, port):
     for info in infos:
         addr = info[4][0]
         ip = ipaddress.ip_address(addr)
-        if (
-            ip.is_loopback
-            or ip.is_link_local
-            or ip.is_private
-            or ip.is_multicast
-            or ip.is_reserved
-            or ip.is_unspecified
-        ):
+        if (not ip.is_global or ip.is_multicast
+                or (isinstance(ip, ipaddress.IPv6Address) and ip in NAT64_WELL_KNOWN)):
             continue
         safe.append(info)
     if not safe:

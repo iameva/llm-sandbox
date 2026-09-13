@@ -154,9 +154,13 @@ def plan(harness, name, profile, dry_run=False):
                 env("ANTHROPIC_API_KEY", "")
         if model:
             arg("--model", model)
-            for variable in ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL"):
-                env(variable, model)
-            env("ANTHROPIC_DEFAULT_HAIKU_MODEL", fast)
+            env("ANTHROPIC_MODEL", model)
+            # Alias overrides require concrete provider model IDs. Leave native
+            # Anthropic aliases for Claude to resolve through its own catalog.
+            if provider != "anthropic":
+                for variable in ("ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL"):
+                    env(variable, model)
+                env("ANTHROPIC_DEFAULT_HAIKU_MODEL", fast)
             env("CLAUDE_CODE_SUBAGENT_MODEL", fast)
         if provider == "deepseek":
             env("CLAUDE_CODE_EFFORT_LEVEL", "max")

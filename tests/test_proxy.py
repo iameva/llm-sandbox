@@ -96,3 +96,34 @@ class ProxyTests(unittest.TestCase):
                 self.assertFalse(worker.is_alive())
             self.assertEqual([e["decision"] for e in events], ["connected"])
             self.assertFalse(events[0]["listed"])
+
+
+class AddressPolicyTests(unittest.TestCase):
+    """Controlled DNS answers exercise the real filter without any network."""
+
+    def resolve(self, addresses):
+        infos = []
+        for address in addresses:
+            family = socket.AF_INET6 if ':' in address else socket.AF_INET
+            target = (address, 443, 0, 0) if family == socket.AF_INET6 else (address, 443)
+            infos.append((family, socket.SOCK_STREAM, socket.IPPROTO_TCP, '', target))
+        with patch.object(proxy.socket, 'getaddrinfo', return_value=infos) as resolver:
+            result = proxy.resolve_public('allowlisted.example', 443)
+            resolver.assert_called_once()
+            return result
+
+    def test_unsafe_answers_are_rejected_even_for_allowlisted_names(self):
+        addresses = ['127.0.0.1', '10.0.0.1', '169.254.169.254', '100.64.0.1',
+                     '100.127.255.254', '198.18.0.1', '192.0.0.170', '0.0.0.0',
+                     '255.255.255.255', '224.0.0.1', '239.1.2.3', '::1', '::',
+                     'fc00::1', 'fe80::1', 'ff02::1', '::ffff:127.0.0.1',
+                     '::ffff:10.0.0.1', '::ffff:100.64.0.1', '64:ff9b::7f00:1',
+                     '64:ff9b::808:808']
+        for address in addresses:
+            with self.subTest(address=address), self.assertRaises(PermissionError):
+                self.resolve([address])
+
+    def test_public_answers_pass_and_mixed_answers_do_not_leak_private_targets(self):
+        public = ['8.8.8.8', '2606:4700::1111', '::ffff:8.8.8.8']
+        result = self.resolve(['127.0.0.1', '100.64.0.1', *public])
+        self.assertEqual([info[4][0] for info in result], public)

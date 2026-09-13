@@ -59,6 +59,28 @@ class ProfileTests(unittest.TestCase):
         self.assertIn(('env', 'ANTHROPIC_BASE_URL=http://127.0.0.1:4000'), records)
         self.assertIn(('secret', 'ANTHROPIC_AUTH_TOKEN=DRY_RUN_KEY_NOT_LOADED'), records)
 
+    def test_anthropic_profiles_preserve_native_alias_resolution(self):
+        for auth in ('login', 'api_key'):
+            for model in ('opus', 'sonnet', 'haiku', 'claude-opus-4-6'):
+                with self.subTest(auth=auth, model=model):
+                    profile = {**backends.DEFAULTS['claude'], 'auth': auth, 'model': model}
+                    records = backends.plan('claude', 'claude', profile, True)
+                    self.assertEqual([value for kind, value in records if kind == 'arg'],
+                                     ['--model', model])
+                    self.assertIn(('env', 'CLAUDE_CODE_SUBAGENT_MODEL=haiku'), records)
+                    self.assertFalse(any(value.startswith('ANTHROPIC_DEFAULT_')
+                                         for kind, value in records if kind == 'env'))
+
+    def test_third_party_claude_profiles_remap_all_model_families(self):
+        for profile in (backends.DEFAULTS['deepseek'],
+                        {'provider': 'openai', 'auth': 'api_key', 'model': 'gateway-main',
+                         'fast_model': 'gateway-fast', 'anthropic_base_url': 'https://example.org'}):
+            with self.subTest(provider=profile['provider']):
+                records = backends.plan('claude', 'gateway', profile, True)
+                for family in ('OPUS', 'SONNET', 'HAIKU'):
+                    model = profile['fast_model' if family == 'HAIKU' else 'model']
+                    self.assertIn(('env', f'ANTHROPIC_DEFAULT_{family}_MODEL={model}'), records)
+
     def test_gpt_profiles_need_a_model_even_on_native_harnesses(self):
         for harness in ['codex', 'pi', 'omp', 'opencode']:
             with self.subTest(harness=harness), self.assertRaisesRegex(ValueError, 'set a model'):
@@ -169,6 +191,7 @@ class BackendRunnerTests(RunnerFixture):
                     self.assertTrue(any('gpt-5.6-luna' in arg for arg in args))
         self.assertEqual(self.launch('claude').returncode, 0)
         self.assertIn('opus', self.argv())
+        self.assertFalse(any(arg.startswith('ANTHROPIC_DEFAULT_') for arg in self.argv()))
         self.assertEqual(self.launch('aider').returncode, 0)
         self.assertIn('deepseek/deepseek-v4-pro', self.argv())
 

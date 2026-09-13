@@ -1,0 +1,226 @@
+{
+  "checks": {
+    "both_allowed_tunnels_work": true,
+    "both_denied_connects_refused": true,
+    "direct_host_tcp_blocked": true,
+    "cross_vm_tcp_blocked": true,
+    "both_guest_listener_controls_work": true,
+    "a_proxy_failure_blocks_new_tunnels": true,
+    "both_local_controls_survive_proxy_stop": true,
+    "no_direct_host_fallback_after_proxy_stop": true,
+    "cross_vm_still_blocked_after_proxy_stop": true,
+    "b_proxy_unaffected_by_a_proxy_stop": true,
+    "b_proxy_unaffected_by_a_vm_stop": true,
+    "b_direct_host_still_blocked_after_a_vm_stop": true,
+    "b_local_control_survives_a_vm_stop": true,
+    "a_udp_guest_positive_control": true,
+    "a_host_udp_no_reply": true,
+    "a_builtin_dns_no_reply": true,
+    "a_builtin_dns_tcp_blocked": true,
+    "a_proxy_address_other_port_blocked": true,
+    "a_production_plain_http": true,
+    "a_production_malformed_line": true,
+    "a_production_unlisted_host": true,
+    "a_production_wrong_port": true,
+    "a_production_malformed_port": true,
+    "a_production_private_literal": true,
+    "a_ipv6_guest_positive_control": true,
+    "a_ipv4_mapped_host_alias_blocked": true,
+    "a_ipv6_host_alias_blocked": true,
+    "a_direct_public_ipv4_tcp_blocked": true,
+    "a_direct_public_dns_tcp_blocked": true,
+    "a_public_dns_no_reply": true,
+    "a_production_https": true,
+    "b_udp_guest_positive_control": true,
+    "b_host_udp_no_reply": true,
+    "b_builtin_dns_no_reply": true,
+    "b_builtin_dns_tcp_blocked": true,
+    "b_proxy_address_other_port_blocked": true,
+    "b_production_plain_http": true,
+    "b_production_malformed_line": true,
+    "b_production_unlisted_host": true,
+    "b_production_wrong_port": true,
+    "b_production_malformed_port": true,
+    "b_production_private_literal": true,
+    "b_ipv6_guest_positive_control": true,
+    "b_ipv4_mapped_host_alias_blocked": true,
+    "b_ipv6_host_alias_blocked": true,
+    "b_direct_public_ipv4_tcp_blocked": true,
+    "b_direct_public_dns_tcp_blocked": true,
+    "b_public_dns_no_reply": true,
+    "b_production_https": true,
+    "host_ipv6_receivers_only_controls": true,
+    "host_udp_receivers_only_controls": true,
+    "a_active_stream_closed_on_proxy_stop": true,
+    "b_active_stream_survives_a_proxy_stop": true,
+    "a_receiver_phase_tokens": true,
+    "b_receiver_phase_tokens": true
+  },
+  "reports": {
+    "a": {
+      "self_listener": true,
+      "allowed": true,
+      "denied": true,
+      "direct_host": false,
+      "other_vm": false
+    },
+    "b": {
+      "self_listener": true,
+      "allowed": true,
+      "denied": true,
+      "direct_host": false,
+      "other_vm": false
+    },
+    "lifecycle": {
+      "a": {
+        "active_stream_after_stop": "closed",
+        "allowed_after_proxy_a_stop": false,
+        "proxy_failure_error": "[Errno 104] Connection reset by peer",
+        "direct_host_after_proxy_a_stop": false,
+        "other_vm_after_proxy_a_stop": false,
+        "self_listener_after_proxy_a_stop": true
+      },
+      "b": {
+        "active_stream_after_stop": "echo",
+        "allowed_after_proxy_a_stop": true,
+        "proxy_failure_error": null,
+        "direct_host_after_proxy_a_stop": false,
+        "other_vm_after_proxy_a_stop": false,
+        "self_listener_after_proxy_a_stop": true,
+        "denied_after_proxy_a_stop": true,
+        "allowed_after_vm_a_stop": true,
+        "denied_after_vm_a_stop": true,
+        "direct_host_after_vm_a_stop": false,
+        "self_listener_after_vm_a_stop": true
+      }
+    },
+    "broad": {
+      "a": {
+        "checks": {
+          "udp_guest_positive_control": true,
+          "host_udp_no_reply": true,
+          "builtin_dns_no_reply": true,
+          "builtin_dns_tcp_blocked": true,
+          "proxy_address_other_port_blocked": true,
+          "production_plain_http": true,
+          "production_malformed_line": true,
+          "production_unlisted_host": true,
+          "production_wrong_port": true,
+          "production_malformed_port": true,
+          "production_private_literal": true,
+          "ipv6_guest_positive_control": true,
+          "ipv4_mapped_host_alias_blocked": true,
+          "ipv6_host_alias_blocked": true,
+          "direct_public_ipv4_tcp_blocked": true,
+          "direct_public_dns_tcp_blocked": true,
+          "public_dns_no_reply": true,
+          "production_https": true
+        },
+        "notes": {
+          "ipv6_tcp": "SKIP: host positive control unavailable: [Errno 101] Network is unreachable"
+        },
+        "details": {
+          "host_udp": {
+            "reply": false,
+            "error": "timed out"
+          },
+          "builtin_dns": {
+            "reply": false,
+            "error": "timed out"
+          },
+          "plain_http": 405,
+          "malformed_line": 400,
+          "unlisted_host": 403,
+          "wrong_port": 403,
+          "malformed_port": 400,
+          "private_literal": 403,
+          "ipv6_setup": [
+            {
+              "code": 0,
+              "error": ""
+            },
+            {
+              "code": 0,
+              "error": ""
+            },
+            {
+              "code": 0,
+              "error": ""
+            },
+            {
+              "code": 0,
+              "error": ""
+            }
+          ],
+          "dns_udp": {
+            "reply": false,
+            "error": "timed out"
+          }
+        }
+      },
+      "b": {
+        "checks": {
+          "udp_guest_positive_control": true,
+          "host_udp_no_reply": true,
+          "builtin_dns_no_reply": true,
+          "builtin_dns_tcp_blocked": true,
+          "proxy_address_other_port_blocked": true,
+          "production_plain_http": true,
+          "production_malformed_line": true,
+          "production_unlisted_host": true,
+          "production_wrong_port": true,
+          "production_malformed_port": true,
+          "production_private_literal": true,
+          "ipv6_guest_positive_control": true,
+          "ipv4_mapped_host_alias_blocked": true,
+          "ipv6_host_alias_blocked": true,
+          "direct_public_ipv4_tcp_blocked": true,
+          "direct_public_dns_tcp_blocked": true,
+          "public_dns_no_reply": true,
+          "production_https": true
+        },
+        "notes": {
+          "ipv6_tcp": "SKIP: host positive control unavailable: [Errno 101] Network is unreachable"
+        },
+        "details": {
+          "host_udp": {
+            "reply": false,
+            "error": "timed out"
+          },
+          "builtin_dns": {
+            "reply": false,
+            "error": "timed out"
+          },
+          "plain_http": 405,
+          "malformed_line": 400,
+          "unlisted_host": 403,
+          "wrong_port": 403,
+          "malformed_port": 400,
+          "private_literal": 403,
+          "ipv6_setup": [
+            {
+              "code": 0,
+              "error": ""
+            },
+            {
+              "code": 0,
+              "error": ""
+            },
+            {
+              "code": 0,
+              "error": ""
+            },
+            {
+              "code": 0,
+              "error": ""
+            }
+          ],
+          "dns_udp": {
+            "reply": false,
+            "error": "timed out"
+          }
+        }
+      }
+    }
+  }
+}
