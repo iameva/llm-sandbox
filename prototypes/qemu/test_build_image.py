@@ -40,10 +40,10 @@ class BuildTests(unittest.TestCase):
         self.assertIn('--fetch-timeout=60000', command)
         self.assertEqual(command[-1], '@anthropic-ai/claude-code')
 
-    def test_normal_launch_remains_disposable(self):
+    def test_command_uses_caller_selected_disk_without_implicit_snapshot(self):
         command = qemu_command('qemu', Path('/base.qcow2'), Path('/seed.iso'),
                                Path('/fs.sock'), 12345)
-        self.assertIn('-snapshot', command)
+        self.assertNotIn('-snapshot', command)
         self.assertIn('restrict=on,ipv6=off', command[command.index('-netdev')+1])
 
 

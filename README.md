@@ -241,7 +241,7 @@ export SANDBOX_ALLOW_FILE="$PWD/egress-allowlist.txt"
 The current directory becomes /workspace. The same backend/model arguments
 and per-agent directories under ~/.config/llm-sandbox are used as by the
 existing launchers. Two Codex commands can run concurrently in the same
-directory: each gets an independent guest disk snapshot, QEMU network stack
+directory: each gets an independent disposable disk overlay, QEMU network stack
 and enforcing proxy, while both intentionally share project files and
 Codex state. Workspace and shared agent-state changes persist. Other guest
 disk changes are discarded.
@@ -256,7 +256,7 @@ credential refresh behavior still need acceptance testing with real agents.
 Codex's SQLite databases use a private guest directory through
 `CODEX_SQLITE_HOME=/var/lib/llm-sandbox/codex-sqlite`. Config, credentials and
 session files remain shared, and existing host databases are left untouched.
-SQLite state is discarded with each launch's snapshot. Separate databases do
+SQLite state is discarded with each launch's overlay. Separate databases do
 not coordinate background work across VMs; concurrent updates to the remaining
 shared Codex files have not been validated. Remove any explicit `sqlite_home`
 setting in Codex config, which otherwise overrides this environment variable.
@@ -276,7 +276,7 @@ on normal exit; a killed launcher can leave private temporary artifacts.
 
 Use --shell for a shell with the selected agent's state, or --check for
 a noninteractive guest smoke check. --check tests identity, state access,
-proxy denial and direct TCP failures; it is not a replacement for the
+SQLite WAL access, proxy denial and direct TCP failures; it is not a replacement for the
 controlled host boundary suite.
 
 Before making QEMU your default, run the new installed-launcher acceptance:
@@ -290,7 +290,8 @@ It uses a fresh temporary home, project and Codex state, installs only into
 that temporary home, and starts two simultaneous launcher instances (4 GiB
 total RAM). It verifies shared state, private VM homes, the ability to bind
 the same guest port, host file ownership, and one VM surviving the other's
-exit. It performs no agent login and exports no real project or credentials.
+exit. With --runtime-checks it also verifies terminal sizing and live resize;
+it checks explicit overlay selection and cleanup in every run. It performs no agent login and exports no real project or credentials.
 
 Remaining host gates: the acceptance command above; launcher --check; two
 authenticated instances of the same agent streaming concurrently from the
@@ -299,3 +300,61 @@ closure/helper-failure cleanup. The earlier QEMU boundary suite covers
 filesystem socket isolation, controlled direct-network probes, DNS capture
 and actual proxy-process crashes. Repeat its key checks if launch network or
 filesystem wiring changes.
+
+### QEMU runtime controls
+
+Supported runtime code lives in `qemu/`; `prototypes/qemu/` contains image
+preparation and acceptance tools, plus compatibility entry points.
+Reinstall with `sh install.sh` after runtime changes. No image rebuild is needed.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SANDBOX_QEMU_MEMORY_MIB` | `2048` | Guest RAM in MiB (512–1048576) |
+| `SANDBOX_QEMU_CPUS` | `2` | Guest vCPUs (1–1024) |
+| `SANDBOX_QEMU_BOOT_TIMEOUT` | `600` | Seconds to guest readiness |
+| `SANDBOX_QEMU_BATCH_TIMEOUT` | `0` | Command seconds after readiness; zero means unlimited for ordinary batch runs |
+| `SANDBOX_QEMU_IDLE_TIMEOUT` | `0` | Established proxy tunnel inactivity seconds; zero keeps idle tunnels open |
+| `SANDBOX_QEMU_CACHE_DIR` | `$XDG_CACHE_HOME/llm-sandbox/qemu` | Private disk-backed storage; defaults to `~/.cache/llm-sandbox/qemu` when XDG_CACHE_HOME is unset |
+| `SANDBOX_QEMU_KEEP_ARTIFACTS` | `0` | Set to 1 to retain diagnostics after successful runs |
+
+Timeout settings accept up to 604800 seconds; the boot timeout must be positive.
+Verification commands default to a 900-second command deadline. The memory
+backend size follows the RAM setting. No arbitrary QEMU arguments are accepted.
+
+The runtime creates one qcow2 overlay per launch, backed by the selected image.
+Keep that base image unchanged while any VM is running. Storage must be outside
+all guest exports and cannot be tmpfs or ramfs. Short Unix socket paths remain
+in a separate private temporary directory, which is removed on exit.
+
+Successful runs remove their artifacts by default. Failed runs and explicit
+retention keep only diagnostics: overlays and seed files are removed, guest
+reports are extracted, and each retained file is capped at its last 1 MiB.
+On launch and exit, completed diagnostics older than seven days or beyond the
+five newest runs are pruned. Logs can contain terminal output; retained directories
+are private to the host user. SIGKILL or host failure can leave incomplete run
+artifacts; these are not automatically deleted because child processes may
+still be using them.
+
+Terminal dimensions are applied before the agent starts and updated after
+host resizes. The size record carries only rows and columns; there is no
+additional network channel. Established tunnels have no idle deadline by
+default; initial proxy connections still have bounded timeouts.
+
+The normal filesystem cache policy remains `never`. To compare performance,
+run the disposable acceptance tool twice:
+
+```sh
+python3 prototypes/qemu/accept_launcher.py --runtime-checks --cache-benchmark never \
+  --disk "$SANDBOX_QEMU_DISK"
+python3 prototypes/qemu/accept_launcher.py --runtime-checks --cache-benchmark auto \
+  --disk "$SANDBOX_QEMU_DISK"
+```
+
+Only the temporary installed runtime uses the requested benchmark policy.
+The probes time three scans of 500 files per VM and check visibility of a host
+file replacement while both guests are active. These are small benchmarks,
+not a certification of cache coherence for every application. They use no
+credentials, public downloads or real workspace exports. Acceptance artifacts
+are retained under `~/.cache/llm-sandbox/qemu-acceptance` for manual review.
+Add `--long-batch-seconds 960` to test a batch command beyond the old fifteen-minute
+limit; this deliberately adds sixteen minutes to the run.

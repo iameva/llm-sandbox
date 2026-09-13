@@ -119,7 +119,6 @@ def main():
                 raise RuntimeError('virtiofsd did not start')
             time.sleep(.1)
         command = qemu_command(qemu, image, seed, fs, proxy.ports['build'])
-        command.remove('-snapshot')  # Only the newly created private copy is writable.
         command[command.index('stdio,id=console,signal=off')] = f'file,id=console,path={base}/console.log'
         qlog = (base/'qemu.log').open('w')
         logs.append(qlog)

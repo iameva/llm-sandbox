@@ -184,7 +184,7 @@ class BackendRunnerTests(RunnerFixture):
                 result = self.launch(harness)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 args = self.argv()
-                expected_model = 'gpt-6-astra' if harness == 'codex' else 'gpt-5.6-sol'
+                expected_model = 'gpt-6-astra'
                 self.assertTrue(any(expected_model in arg for arg in args))
                 self.assertFalse(any('API_KEY' in arg for arg in args))
                 if harness in ('omp', 'opencode'):

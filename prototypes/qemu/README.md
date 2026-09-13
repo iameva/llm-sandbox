@@ -1,3 +1,8 @@
+The supported launcher runtime has moved to `../../qemu/`. The current resource,
+storage, terminal and retention settings are documented in the root README.
+The older experiments below describe their original behavior; their `-snapshot`
+and artifact-retention descriptions do not apply to the installed launcher.
+
 # QEMU filesystem prototype
 
 This is a first filesystem feasibility test, not the finished sandbox or an
@@ -486,7 +491,7 @@ provision.log. No host tracing or elevated host privileges are used.
 The root README now documents SANDBOX_ISOLATION=qemu and the installed
 entry points. This supersedes the earlier plan to keep all agent state only
 inside VM disks: the agreed default for integrated launches is live shared
-sandbox-specific agent state, with an independent disposable disk snapshot
+sandbox-specific agent state, with an independent disposable disk overlay
 per invocation. The standalone sandbox.py --vm-dir option remains an
 explicit persistent-VM diagnostic mode; installed launchers never select a
 common writable VM disk.
@@ -497,7 +502,7 @@ owned by the guest user on its own disk. This avoids SQLite WAL shared-memory
 mapping failures on the virtiofs state export. Config, credentials and session
 files remain shared; existing host databases are neither copied nor modified.
 Database-only state is private and is discarded when an integrated launch's
-snapshot exits. It persists when explicitly using the standalone --vm-dir mode.
+overlay exits. It persists when explicitly using the standalone --vm-dir mode.
 Separate databases also separate background-job coordination; correctness of
 concurrent Codex operations on the remaining shared files is not established.
 An explicit sqlite_home setting in Codex config takes precedence over the
@@ -512,3 +517,51 @@ It also opens WAL databases at the same guest path in both VMs, checks that a
 second connection can read during a write transaction, and verifies that each
 database contains only its own VM's marker. These checks cover storage behavior,
 not Codex's application-level coordination.
+
+### Launcher hardening acceptance
+
+Run `accept_launcher.py --runtime-checks --disk IMAGE` after reinstalling.
+It now exercises terminal initialization and resize through a host pseudo-terminal,
+per-run explicit overlays and their cleanup, shared state, private SQLite WAL
+files and one guest surviving another's exit. No root or real credentials are used.
+Use `--cache-benchmark never` and then `--cache-benchmark auto` to measure the
+temporary fixture and host replacement visibility. This does not change the
+normal runtime's `never` cache policy. `--long-batch-seconds 960` exercises a
+command beyond the former fifteen-minute limit. The long-batch check remains
+pending; the short runtime and cache probes have host results below.
+
+A failed acceptance run now prints bounded launcher/guest log tails and saves
+failure.json. To inspect a previous run without booting a VM or creating files,
+use `accept_launcher.py --diagnose /path/to/acceptance-directory`.
+
+The first hardening host run reached clean guest exits but the launcher
+misclassified a helper exiting during QEMU poweroff as an active-session
+failure. The supervisor now allows up to two seconds for QEMU to exit when a
+helper stops. If QEMU remains running, helper failure still stops the VM.
+Actual QEMU exit status and the guest exit report are still checked.
+Regression tests cover this ordering, nonzero QEMU exit status and a helper
+failing while its VM remains active. The repeat host run below completed
+without the shutdown race.
+
+Host run qemu-launch-accept-h0p7126p confirmed A's initial/live terminal size,
+both guests' state sharing and private SQLite WAL storage, host replacement
+visibility, overlay selection/cleanup, and B surviving A. With cache=never,
+500-file scans took 84–95 ms. The two false B terminal checks were a probe bug:
+the batch guest still has ttyS0, but receives no host resize events. Terminal
+checks now require an explicit --terminal-probe argument passed only to A when
+--runtime-checks is requested. A local regression test covers both serial-TTY
+guests and explicit selection. The corrected host comparison follows.
+
+Host run qemu-launch-accept-9_uuj6vn passed every reported check with cache=auto
+on 2026-09-13. This covered terminal initialization and resize, live shared
+state, private guest homes and SQLite WAL files, UID/ownership, independent
+listener ports, host file replacement visibility, B surviving A, and explicit
+overlay selection and cleanup. Artifacts were retained at:
+/var/home/duve/.cache/llm-sandbox/qemu-acceptance/qemu-launch-accept-9_uuj6vn
+
+Mean first-scan times across A/B were 91.0 ms for never and 75.1 ms for auto.
+Mean repeat-scan times (the last two scans in each VM) were 86.2 ms for never
+and 35.4 ms for auto, about 2.43 times faster in this 500-file fixture.
+The runs were sequential, not a controlled cache-coherence stress test.
+Normal launchers retain cache=never. Long batch runs, real-agent concurrent
+state updates and credential refresh remain separate acceptance items.

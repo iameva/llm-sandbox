@@ -125,12 +125,12 @@ def resolve_public(host, port):
     return safe
 
 
-def splice(a, b):
+def splice(a, b, idle_timeout=IDLE_TIMEOUT):
     """Pump bytes both ways until either side closes or goes idle."""
     socks = [a, b]
     try:
         while True:
-            readable, _, errored = select.select(socks, [], socks, IDLE_TIMEOUT)
+            readable, _, errored = select.select(socks, [], socks, idle_timeout)
             if errored or not readable:
                 return
             for src in readable:
@@ -246,7 +246,7 @@ class Handler(socketserver.StreamRequestHandler):
         self.request.settimeout(None)
         upstream.settimeout(None)
         try:
-            splice(self.request, upstream)
+            splice(self.request, upstream, getattr(self.server, 'idle_timeout', IDLE_TIMEOUT))
         finally:
             upstream.close()
 
@@ -302,7 +302,11 @@ def main():
                     help="comma-separated destination ports to permit")
     ap.add_argument("--summarize", action="store_true",
                     help="print hosts seen in the log and exit")
+    ap.add_argument('--idle-timeout', type=int, default=IDLE_TIMEOUT,
+                    help='established tunnel inactivity seconds; 0 disables the idle limit')
     args = ap.parse_args()
+    if args.idle_timeout < 0:
+        ap.error('--idle-timeout must not be negative')
 
     if args.summarize:
         summarize(args.log)
@@ -327,6 +331,7 @@ def main():
     os.makedirs(os.path.dirname(os.path.abspath(args.log)), exist_ok=True)
 
     server = ProxyServer((bind_host, int(bind_port)), Handler)
+    server.idle_timeout = args.idle_timeout or None
     server.mode = args.mode
     server.allowlist = allowlist
     server.log_path = args.log

@@ -18,7 +18,7 @@ class SandboxTests(unittest.TestCase):
             self.assertEqual(existing.read_bytes(), b'existing state must not be opened or changed')
             self.assertEqual(list(Path(directory).iterdir()), [existing])
 
-    def test_only_restricted_proxy_forward_and_snapshot_are_present(self):
+    def test_restricted_proxy_forward_uses_explicit_disk(self):
         command = qemu_command('/usr/bin/qemu', Path('/disk.qcow2'),
                                Path('/seed.iso'), Path('/run/fs.sock'), 42123)
         network = command[command.index('-netdev')+1]
@@ -26,7 +26,7 @@ class SandboxTests(unittest.TestCase):
         self.assertEqual(network.count('guestfwd='), 1)
         self.assertIn('10.0.2.100:3128-cmd:', network)
         self.assertNotIn('hostfwd=', network)
-        self.assertIn('-snapshot', command)
+        self.assertNotIn('-snapshot', command)
         self.assertEqual(command[command.index('-monitor')+1], 'none')
         self.assertNotIn('-enable-kvm', command)  # KVM is selected by machine.
         self.assertIn('q35,accel=kvm', command)

@@ -51,6 +51,18 @@ class QemuRunnerTests(RunnerFixture):
         self.assertIn(str(self.home/'.config/llm-sandbox/qemu/sandbox.py'), shlex.split(result.stdout))
         self.assertTrue((self.home/'.config/llm-sandbox/qemu/egress-proxy.py').is_file())
 
+    def test_qemu_resource_settings_reach_installed_runtime(self):
+        result = self.qemu('codex', SANDBOX_QEMU_MEMORY_MIB='4096', SANDBOX_QEMU_CPUS='4',
+                           SANDBOX_QEMU_BOOT_TIMEOUT='300', SANDBOX_QEMU_BATCH_TIMEOUT='0',
+                           SANDBOX_QEMU_IDLE_TIMEOUT='0', SANDBOX_QEMU_CACHE_DIR='/disk/cache',
+                           SANDBOX_QEMU_KEEP_ARTIFACTS='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = shlex.split(result.stdout)
+        for option, value in [('memory-mib', '4096'), ('cpus', '4'), ('boot-timeout', '300'),
+                              ('batch-timeout', '0'), ('idle-timeout', '0'), ('cache-dir', '/disk/cache')]:
+            self.assertEqual(argv[argv.index('--'+option)+1], value)
+        self.assertIn('--keep-artifacts', argv)
+
     def test_missing_image_setting_fails_without_podman(self):
         result = self.launch('codex', SANDBOX_ISOLATION='qemu', SANDBOX_DRY_RUN='1')
         self.assertNotEqual(result.returncode, 0)

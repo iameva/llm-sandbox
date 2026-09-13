@@ -572,3 +572,26 @@ files. Instance B survived instance A exiting. This validates launcher
 concurrency with temporary state; authenticated agent concurrency remains
 untested. Next: installed --check and two real Codex sessions in the same
 project, followed by the other agents and login/refresh persistence.
+
+
+Launcher hardening (2026-09-13): supported runtime now lives in qemu/.
+Installed launches use per-run explicit overlays on disk-backed cache storage,
+configurable RAM/CPU/deadlines, initial/live terminal sizing, and no established
+proxy idle timeout by default. Diagnostics are bounded and completed runs are
+pruned; disposable overlays and seeds are removed on normal cleanup. Cache
+policy remains never; the small host cache comparison is recorded below. The expanded
+accept_launcher.py stages resize, overlay cleanup, SQLite separation, optional
+long batch runs and temporary never/auto cache benchmarks. Earlier boundary
+results are historical evidence; current launcher results follow.
+
+Local validation for this hardening pass: 37 QEMU tests passed. The main suite
+ran 44 tests, with the same three model-expectation subtest failures and one
+skip. Shell syntax, Python compilation and diff whitespace checks passed.
+
+Host hardening acceptance: qemu-launch-accept-9_uuj6vn passed every reported
+check with cache=auto, following the never baseline in
+qemu-launch-accept-h0p7126p. Runtime resize, storage separation and cleanup,
+shared-file visibility and B surviving A were confirmed. Auto improved mean
+repeated 500-file scans from 86.2 to 35.4 ms. Production cache policy remains
+never; this fixture does not establish correctness of concurrent application
+state updates. Long batch and authenticated agent acceptance remain pending.

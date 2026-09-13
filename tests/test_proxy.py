@@ -8,6 +8,7 @@ from pathlib import Path
 import socket
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -17,6 +18,29 @@ spec.loader.exec_module(proxy)
 
 
 class ProxyTests(unittest.TestCase):
+    def test_tunnel_idle_limit_can_be_disabled(self):
+        for timeout in (.05, None):
+            client, a = socket.socketpair()
+            b, peer = socket.socketpair()
+            worker = threading.Thread(target=proxy.splice, args=(a, b, timeout), daemon=True)
+            worker.start()
+            try:
+                time.sleep(.15)
+                if timeout is None:
+                    self.assertTrue(worker.is_alive())
+                    client.sendall(b'still connected')
+                    peer.settimeout(2)
+                    self.assertEqual(peer.recv(100), b'still connected')
+                else:
+                    worker.join(2)
+                    self.assertFalse(worker.is_alive())
+            finally:
+                client.close()
+                peer.close()
+                worker.join(2)
+                a.close()
+                b.close()
+
     def test_hostname_boundaries(self):
         allowed = {".example.org", "api.example.com"}
         for host in ["example.org", "a.example.org", "API.EXAMPLE.COM."]:
