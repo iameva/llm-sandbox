@@ -44,7 +44,7 @@ class BuildMonitor:
         if now-self.started > 7200:
             raise TimeoutError('build exceeded two hours')
         console = self.base/'console.log'
-        if console.exists():
+        if console.exists() and not report:
             with console.open('rb') as stream:
                 stream.seek(max(0, console.stat().st_size-32768))
                 if b'Failed to run module scripts_user' in stream.read():

@@ -25,7 +25,7 @@
 #   SANDBOX_BACKEND   Default backend for this invocation
 #   SANDBOX_MODEL     Model override for this invocation
 #   SANDBOX_BACKENDS_FILE  Alternate host path to backends.json
-#   SANDBOX_ISOLATION   container (default) | gvisor | vm
+#   SANDBOX_ISOLATION   container (default) | gvisor | vm | qemu
 #                       gvisor needs a hand-installed runsc; vm needs
 #                       crun-krun and /dev/kvm, and is currently broken
 #                       (see the uid note below).
@@ -202,6 +202,7 @@ ENVS=()
 CMD=()
 
 HOME_IN_SANDBOX="/home/appuser"
+[[ "$ISOLATION" != "qemu" ]] || HOME_IN_SANDBOX="/home/fedora"
 
 # Set when Claude Code should read its global config from inside the
 # ~/.claude directory mount. Consumed after configure_agent, because
@@ -598,6 +599,7 @@ elif [[ "${SANDBOX_CHECK:-}" == "1" || "${1:-}" == "--check" ]]; then
     # just container mode working as asked. Both vm and gvisor report a
     # kernel of their own — gVisor's Sentry answers uname itself — so a
     # kernel matching the host means the runtime silently did nothing.
+    [[ "$ISOLATION" != "qemu" ]] || IS_QEMU_CHECK=1
     ENVS+=("HOST_KERNEL=$(uname -r)")
     ENVS+=("ISOLATION_MODE=$ISOLATION")
     ENVS+=("EXPECT_OWN_KERNEL=$([[ "$ISOLATION" == "container" ]] && echo 0 || echo 1)")
@@ -612,6 +614,39 @@ elif [[ "${SANDBOX_CHECK:-}" == "1" || "${1:-}" == "--check" ]]; then
     ENVS+=("PROXY_MODE=${SANDBOX_PROXY_MODE:-enforce}")
     CMD=(zsh -c "$CHECK_SCRIPT")
     set --
+fi
+
+# QEMU uses the same harness plan and live state directories, with a
+# private snapshot and proxy per invocation. It never enters Podman's path.
+if [[ "$ISOLATION" == "qemu" ]]; then
+    [[ "$AGENT" != "aider" ]] || die "the QEMU image does not include aider"
+    [[ "$CLAUDE_CONFIG_IN_DIR" == "1" ]] || die "QEMU requires SANDBOX_CLAUDE_CONFIG_DIR=1"
+    [[ -n "${SANDBOX_QEMU_DISK:-}" ]] || die "set SANDBOX_QEMU_DISK to the built agent qcow2 image"
+    qemu_runner="$script_dir/prototypes/qemu/sandbox.py"
+    [[ -f "$qemu_runner" ]] || qemu_runner="$ROOT/qemu/sandbox.py"
+    [[ -f "$qemu_runner" ]] || die "QEMU launcher is missing; rerun install.sh"
+    qemu_allow="${SANDBOX_ALLOW_FILE:-$ROOT/egress-allowlist.txt}"
+    qargv=(python3 "$qemu_runner" --disk "$SANDBOX_QEMU_DISK"
+           --workspace "$PWD" --allow-file "$qemu_allow")
+    [[ "${SANDBOX_BATCH:-0}" != "1" ]] || qargv+=(--batch)
+    for m in "${MOUNTS[@]}"; do
+        qargv+=(--mount "$ROOT/${m%%:*}:${m#*:}")
+    done
+    for e in "${ENVS[@]}"; do qargv+=(--env "$e"); done
+    for asset in "${BACKEND_ASSETS[@]}"; do qargv+=(--asset "$asset"); done
+    # The existing cloud image includes bash; new builds also include zsh.
+    if [[ "${CMD[0]}" == "zsh" ]]; then CMD[0]=bash; fi
+    if [[ "${SANDBOX_CHECK:-}" == "1" || "${IS_QEMU_CHECK:-0}" == "1" ]]; then
+        qargv+=(--verify)
+        CMD=(true)
+    fi
+    qargv+=(--command "${CMD[@]}" "$@")
+    if [[ "$DRY_RUN" == "1" ]]; then
+        printf '%q ' "${qargv[@]}"
+        printf '\n'
+        exit 0
+    fi
+    exec "${qargv[@]}"
 fi
 
 # ---------------------------------------------------------------------

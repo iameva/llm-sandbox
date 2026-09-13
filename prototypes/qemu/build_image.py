@@ -26,12 +26,19 @@ def build_script():
     # terminal and then stopping that getty can revoke our terminal access.
     # Installers receive no input and their output is piped to a file below.
     script = script.replace('exec >/dev/ttyS0 2>&1', 'exec </dev/null')
+    # Queue poweroff after cloud-final has returned, rather than terminating
+    # the cloud-init process that is still reporting this script's result.
+    script = script.replace(
+        "trap 'echo \"Guest setup failed\"; /sbin/poweroff' EXIT",
+        "trap 'systemd-run --no-block --unit=sandbox-build-poweroff "
+        "--property=After=cloud-final.service /usr/bin/systemctl poweroff' EXIT",
+    )
     script += (
         'echo "Starting agent provisioning"\n'
         'python3 -u /mnt/seed/provision_agents.py 2>&1 | '
         'setpriv --reuid=1000 --regid=1000 --clear-groups '
         'tee /workspace/provision.log\n'
-        'sync\n/sbin/poweroff\n'
+        'sync\n'
     )
     return script
 

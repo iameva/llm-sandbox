@@ -223,3 +223,79 @@ On the host, after rebuilding and installing, run each agent's `--check`. It che
 ```
 
 Inspect the generated browser screenshots for missing glyphs. The default image includes Firefox and Chromium; a custom image built with only one browser will fail the smoke test for the omitted browser.
+
+## QEMU backend
+
+QEMU is available as an opt-in isolation mode for Claude, Codex, Pi, OMP,
+OpenCode and the agent shell. Install the launcher files with the existing
+installer, then select the already built five-agent disk:
+
+```sh
+sh install.sh
+export SANDBOX_ISOLATION=qemu
+export SANDBOX_QEMU_DISK=/var/home/duve/qemu-agents-gtxjsoe5/building.qcow2
+export SANDBOX_ALLOW_FILE="$PWD/egress-allowlist.txt"
+,codex-sandbox.sh
+```
+
+The current directory becomes /workspace. The same backend/model arguments
+and per-agent directories under ~/.config/llm-sandbox are used as by the
+existing launchers. Two Codex commands can run concurrently in the same
+directory: each gets an independent guest disk snapshot, QEMU network stack
+and enforcing proxy, while both intentionally share project files and
+Codex state. Workspace and shared agent-state changes persist. Other guest
+disk changes are discarded.
+
+State exposure follows the chosen launcher. For example, Codex shares codex
+and orca, Claude shares claude, and OpenCode shares opencode and local-opencode.
+The shell launcher shares no agent state unless SANDBOX_LLM_AGENTS selects it.
+This is live sharing of sandbox-specific state, not a mount of your whole
+home. Tools can read and modify all selected state. Concurrent edits and
+credential refresh behavior still need acceptance testing with real agents.
+
+Codex's SQLite databases use a private guest directory through
+`CODEX_SQLITE_HOME=/var/lib/llm-sandbox/codex-sqlite`. Config, credentials and
+session files remain shared, and existing host databases are left untouched.
+SQLite state is discarded with each launch's snapshot. Separate databases do
+not coordinate background work across VMs; concurrent updates to the remaining
+shared Codex files have not been validated. Remove any explicit `sqlite_home`
+setting in Codex config, which otherwise overrides this environment variable.
+
+No Podman, pasta, host firewall changes, or sudo are used by QEMU launches.
+QEMU, virtiofsd, KVM access and an ISO maker must be installed already.
+The image is built separately with prototypes/qemu/build_image.py; launchers
+never download or build an image implicitly. Rebuild to add tools to the
+shared base image. Aider is not in the five-agent image and is rejected.
+
+SANDBOX_PROXY does not select QEMU's proxy: every launch starts its own proxy
+in enforce mode. SANDBOX_ALLOW_FILE selects its allowlist; the default is the
+installed ~/.config/llm-sandbox/egress-allowlist.txt. Restart a run to load
+allowlist changes. No API keys are printed in dry-run output. Explicit backend
+secrets passed as environment values travel in the private seed ISO, removed
+on normal exit; a killed launcher can leave private temporary artifacts.
+
+Use --shell for a shell with the selected agent's state, or --check for
+a noninteractive guest smoke check. --check tests identity, state access,
+proxy denial and direct TCP failures; it is not a replacement for the
+controlled host boundary suite.
+
+Before making QEMU your default, run the new installed-launcher acceptance:
+
+```sh
+python3 prototypes/qemu/accept_launcher.py \
+  --disk /var/home/duve/qemu-agents-gtxjsoe5/building.qcow2
+```
+
+It uses a fresh temporary home, project and Codex state, installs only into
+that temporary home, and starts two simultaneous launcher instances (4 GiB
+total RAM). It verifies shared state, private VM homes, the ability to bind
+the same guest port, host file ownership, and one VM surviving the other's
+exit. It performs no agent login and exports no real project or credentials.
+
+Remaining host gates: the acceptance command above; launcher --check; two
+authenticated instances of the same agent streaming concurrently from the
+same project; login persistence; Git/file-watching workflows; and terminal
+closure/helper-failure cleanup. The earlier QEMU boundary suite covers
+filesystem socket isolation, controlled direct-network probes, DNS capture
+and actual proxy-process crashes. Repeat its key checks if launch network or
+filesystem wiring changes.

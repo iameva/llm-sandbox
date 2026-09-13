@@ -23,8 +23,11 @@ class Processes:
                 self.ports[key] = reservation.getsockname()[1]
         log = (self.base/f'{key}.process-console.log').open('a')
         self.logs.append(log)
+        proxy_script = Path(__file__).with_name('egress-proxy.py')
+        if not proxy_script.is_file():
+            proxy_script = Path(__file__).resolve().parents[2]/'egress-proxy.py'
         child = subprocess.Popen([
-            sys.executable, str(Path(__file__).resolve().parents[2]/'egress-proxy.py'),
+            sys.executable, str(proxy_script),
             '--mode', self.mode, '--allow-file', str(self.allow),
             '--listen', f'127.0.0.1:{self.ports[key]}',
             '--log', str(self.base/f'{key}.process-decisions.jsonl'),

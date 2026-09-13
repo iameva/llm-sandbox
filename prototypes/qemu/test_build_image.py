@@ -4,7 +4,7 @@ import unittest
 
 from sandbox import qemu_command
 from build_image import build_script
-from provision_agents import AGENTS
+from provision_agents import AGENTS, claude_install_command
 from pathlib import Path
 
 
@@ -13,6 +13,8 @@ class BuildTests(unittest.TestCase):
         script = build_script()
         subprocess.run(['sh', '-n'], input=script, text=True, check=True)
         self.assertNotIn('sandbox-session.service', script)
+        self.assertIn('--property=After=cloud-final.service', script)
+        self.assertNotIn('/sbin/poweroff', script)
         self.assertIn('mount -t virtiofs workspace /workspace', script)
 
     def test_build_does_not_open_or_stop_the_login_terminal(self):
@@ -24,9 +26,19 @@ class BuildTests(unittest.TestCase):
 
     def test_exact_requested_agents_use_https_installers(self):
         self.assertEqual(set(AGENTS), {'claude', 'codex', 'pi', 'omp', 'opencode'})
-        for url, interpreter in AGENTS.values():
+        for name, (url, interpreter) in AGENTS.items():
+            if name == 'claude':
+                continue
             self.assertTrue(url.startswith('https://'))
             self.assertIn(interpreter, (['sh'], ['bash']))
+
+    def test_claude_uses_guest_prefix_proxy_and_optional_native_package(self):
+        command = claude_install_command('/home/fedora', 'http://10.0.2.100:3128')
+        self.assertEqual(command[command.index('--prefix')+1], '/home/fedora/.local')
+        self.assertIn('--https-proxy=http://10.0.2.100:3128', command)
+        self.assertIn('--include=optional', command)
+        self.assertIn('--fetch-timeout=60000', command)
+        self.assertEqual(command[-1], '@anthropic-ai/claude-code')
 
     def test_normal_launch_remains_disposable(self):
         command = qemu_command('qemu', Path('/base.qcow2'), Path('/seed.iso'),

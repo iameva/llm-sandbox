@@ -460,3 +460,55 @@ artifact directory during cleanup. A successful report must contain all five
 nonempty tool versions. Disk checking, hashing and manifest preparation
 precede publication of agents.qcow2. Interrupted builds remain disposable
 attempts; automatic resume is not implemented.
+
+Claude installation now uses the official @anthropic-ai/claude-code npm
+package under the guest user's ~/.local prefix. The native shell bootstrap
+stalled after its setup banner in a host build despite accepted proxy
+connections; the exact cause remains unknown. npm uses explicit proxy
+settings, includes optional platform binaries, logs HTTP operations, and
+has a ten-minute overall install limit with bounded fetch retries.
+The other four installers are unchanged. This change still needs host
+validation and does not relax the QEMU network policy.
+
+The host confirmed OMP's 201319904-byte release downloads successfully,
+then omp --version times out. Build and interactive launch now explicitly
+use -cpu host with KVM, exposing the host-supported CPU features instead of
+leaving QEMU's CPU model implicit. This is a compatibility correction, not
+a confirmed diagnosis of the OMP timeout. These images are intended for
+local use, not live migration across heterogeneous hosts.
+
+If OMP still times out, the build records guest CPU information and runs a
+15-second strace retry inside the guest; the final 80 trace lines go into
+provision.log. No host tracing or elevated host privileges are used.
+
+### Integrated launcher migration
+
+The root README now documents SANDBOX_ISOLATION=qemu and the installed
+entry points. This supersedes the earlier plan to keep all agent state only
+inside VM disks: the agreed default for integrated launches is live shared
+sandbox-specific agent state, with an independent disposable disk snapshot
+per invocation. The standalone sandbox.py --vm-dir option remains an
+explicit persistent-VM diagnostic mode; installed launchers never select a
+common writable VM disk.
+
+Codex SQLite databases are an exception to live state sharing. The guest sets
+CODEX_SQLITE_HOME to /var/lib/llm-sandbox/codex-sqlite, a mode-0700 directory
+owned by the guest user on its own disk. This avoids SQLite WAL shared-memory
+mapping failures on the virtiofs state export. Config, credentials and session
+files remain shared; existing host databases are neither copied nor modified.
+Database-only state is private and is discarded when an integrated launch's
+snapshot exits. It persists when explicitly using the standalone --vm-dir mode.
+Separate databases also separate background-job coordination; correctness of
+concurrent Codex operations on the remaining shared files is not established.
+An explicit sqlite_home setting in Codex config takes precedence over the
+environment variable; remove that setting to use the launcher's private path.
+This change applies to Codex, not every agent's database storage.
+
+accept_launcher.py exercises two simultaneous installed Codex shell launchers
+against a temporary shared project and temporary shared agent state. It
+requires the prepared agent image and normal host runtime dependencies,
+but no root privileges or public downloads.
+It also opens WAL databases at the same guest path in both VMs, checks that a
+second connection can read during a write transaction, and verifies that each
+database contains only its own VM's marker. These checks cover storage behavior,
+not Codex's application-level coordination.

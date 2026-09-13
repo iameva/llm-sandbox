@@ -543,3 +543,32 @@ Per the user’s preference, there are no host agent-state exports. A dedicated
 VM disk retains agent homes and credentials; only the selected workspace is
 shared. Direct agent launch is implemented.
 The image build and authenticated agent flows still require host validation.
+
+## Integrated QEMU launcher acceptance
+
+The user selected live sharing of the current ~/.config/llm-sandbox agent
+directories. This supersedes the prior per-VM-only credential design.
+The selectable qemu branch now consumes the existing agent/backend plan,
+uses a fresh snapshot and enforcing proxy per launch, and shares only the
+workspace and selected per-agent state. No project lock or shared writable
+VM disk is used. Container, gVisor and legacy krun modes remain selectable.
+
+Installer support, argument forwarding, guest exit reporting and a minimal
+--check path are implemented. The host acceptance script runs two copies
+of the installed Codex launcher with isolated temporary configuration and
+one shared workspace. Host validation and real authenticated concurrency
+remain gates before changing the default.
+
+Local validation: five QEMU dispatch tests passed, including installed
+entry points and concurrent-launch configuration. Runtime/build unit tests
+and syntax checks passed. The full repository suite ran 42 tests and retains
+the three known Pi/OMP/OpenCode model-expectation failures and one skip.
+
+Host acceptance passed on 2026-09-13 with artifacts at
+/tmp/qemu-launch-accept-f97ilcr3. All ten checks passed: both installed Codex
+shell launchers observed shared agent state and separate guest homes, ran as
+UID 1000, bound the same port independently, and wrote host-owned workspace
+files. Instance B survived instance A exiting. This validates launcher
+concurrency with temporary state; authenticated agent concurrency remains
+untested. Next: installed --check and two real Codex sessions in the same
+project, followed by the other agents and login/refresh persistence.

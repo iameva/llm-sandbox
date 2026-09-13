@@ -39,3 +39,10 @@ if [ -e "$ALLOW" ] && ! cmp -s egress-allowlist.txt "$ALLOW"; then
     echo "install.sh: replaced $ALLOW (previous copy saved as $ALLOW.bak)"
 fi
 install -m 0644 egress-allowlist.txt "$ALLOW"
+
+# Keep the QEMU runtime beside its dependencies; no VMs or images are built.
+mkdir -p "$CONF/qemu"
+for file in sandbox.py sandbox_guest.py network_relay.py process_lifecycle.py guest_verify.py; do
+    install -m 0644 "prototypes/qemu/$file" "$CONF/qemu/$file"
+done
+install -m 0644 egress-proxy.py "$CONF/qemu/egress-proxy.py"

@@ -41,6 +41,11 @@ class MonitorTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'cloud-init'):
             self.monitor.poll(now=100)
 
+    def test_success_report_allows_shutdown_warning(self):
+        self.write_report({'ok': True, 'versions': {name: '1' for name in EXPECTED_AGENTS}})
+        (self.base/'console.log').write_text('Failed to run module scripts_user')
+        self.assertTrue(self.monitor.poll(now=100)['ok'])
+
     def test_stage_progress_does_not_require_console_output(self):
         (self.base/'build-status.json').write_text('{"stage":"Installing codex"}')
         self.monitor.poll(now=700)
