@@ -355,6 +355,12 @@ are private to the host user. SIGKILL or host failure can leave incomplete run
 artifacts; these are not automatically deleted because child processes may
 still be using them.
 
+Boot and shutdown messages go to `machine.log`; the CLI uses a separate serial
+terminal, with its output recorded in `console.log`. Interactive launches show
+`Starting sandbox…` until the guest is ready. Shutdown leaves the CLI output
+visible. Both logs follow the run artifact retention policy; use
+`--keep-artifacts` when invoking `qemu/sandbox.py` to retain successful run logs.
+
 Terminal dimensions are applied before the agent starts and checked once per
 second for host resizes. Pixel dimensions are ignored when comparing row/column sizes. The size record carries only rows and columns; there is no
 additional network channel. Established tunnels have no idle deadline by

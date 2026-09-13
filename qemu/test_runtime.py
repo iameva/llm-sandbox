@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from qemu.runtime_support import disk_cache, finish_artifacts, prune_artifacts, write_size, validate_base_image
 from qemu.sandbox_guest import apply_terminal_size
 from qemu.network_relay import relay
-from qemu.sandbox import qemu_command, check_helpers
+from qemu.sandbox import qemu_command, check_helpers, UNIT, USER_DATA
 
 
 class RuntimeTests(unittest.TestCase):
@@ -53,6 +53,16 @@ class RuntimeTests(unittest.TestCase):
             vm.wait(timeout=5)
 
 
+    def test_machine_console_is_separate_from_interactive_terminal(self):
+        argv = qemu_command('qemu', '/disk', '/run/seed.iso', '/sock', 1234)
+        serials = [argv[i+1] for i, arg in enumerate(argv) if arg == '-serial']
+        self.assertEqual(serials, ['chardev:machine', 'chardev:console'])
+        self.assertIn('file,id=machine,path=/run/machine.log', argv)
+        self.assertIn('stdio,id=console,signal=off', argv)
+        self.assertIn('TTYPath=/dev/ttyS1', UNIT)
+        self.assertIn('Conflicts=serial-getty@ttyS1.service', UNIT)
+        self.assertIn('systemctl mask --now serial-getty@ttyS1.service', USER_DATA)
+
     def test_memory_configuration_matches_shared_memory_object(self):
         argv = qemu_command('qemu', '/disk', '/seed', '/sock', 1234, 4096, 4)
         self.assertEqual(argv[argv.index('-m')+1], '4096')
@@ -68,12 +78,15 @@ class RuntimeTests(unittest.TestCase):
             original_rename = Path.rename
             def rename(path, target):
                 return original_rename(path, guest_path(target))
-            with patch.object(sandbox_guest, 'session', side_effect=RuntimeError('mount failed')), \
+            with patch.object(sandbox_guest.os, 'isatty', return_value=True), \
+                 patch.object(sandbox_guest.termios, 'tcdrain', side_effect=termios.error('disconnected')) as drain, \
+                 patch.object(sandbox_guest, 'session', side_effect=RuntimeError('mount failed')), \
                  patch.object(sandbox_guest, 'Path', side_effect=guest_path), \
                  patch.object(Path, 'rename', rename), \
                  patch.object(sandbox_guest.os, 'geteuid', return_value=1000), \
                  contextlib.redirect_stderr(io.StringIO()):
                 sandbox_guest.main()
+            drain.assert_called_once_with(1)
             report = json.loads((Path(directory)/'exit.json').read_text())
             self.assertEqual(report, {'returncode': 2, 'error': 'RuntimeError: mount failed'})
 

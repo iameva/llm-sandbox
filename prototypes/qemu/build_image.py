@@ -24,7 +24,7 @@ from build_support import BuildMonitor, read_report
 
 
 def build_script():
-    script = USER_DATA.split('systemctl stop serial-getty')[0]
+    script = USER_DATA.split('# Start the interactive session.')[0]
     # Keep cloud-init's managed output descriptors. Opening the getty's
     # terminal and then stopping that getty can revoke our terminal access.
     # Installers receive no input and their output is piped to a file below.
@@ -129,7 +129,9 @@ def main():
                 raise RuntimeError('virtiofsd did not start')
             time.sleep(.1)
         command = qemu_command(qemu, image, seed, fs, proxy.ports['build'])
-        command[command.index('stdio,id=console,signal=off')] = f'file,id=console,path={base}/console.log'
+        # Image provisioning runs on the machine console, with no CLI session.
+        command[command.index(f'file,id=machine,path={seed.parent}/machine.log')] = f'file,id=machine,path={base}/console.log'
+        command[command.index('stdio,id=console,signal=off')] = 'null,id=console'
         qlog = (base/'qemu.log').open('w')
         logs.append(qlog)
         vm = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=qlog, stderr=qlog)

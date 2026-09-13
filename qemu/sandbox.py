@@ -15,6 +15,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import termios
 import time
 
 try:
@@ -45,7 +46,8 @@ for command in [
 ]:
     subprocess.run(command, check=True)
 GUEST
-systemctl stop serial-getty@ttyS0.service
+# Start the interactive session.
+systemctl mask --now serial-getty@ttyS1.service
 cp /mnt/seed/sandbox-session.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl start --no-block sandbox-session.service
@@ -55,7 +57,7 @@ trap - EXIT
 UNIT = """[Unit]
 Description=Disposable sandbox console
 After=cloud-final.service
-Conflicts=serial-getty@ttyS0.service
+Conflicts=serial-getty@ttyS1.service
 
 [Service]
 Type=simple
@@ -64,7 +66,7 @@ ExecStopPost=/usr/sbin/poweroff
 StandardInput=tty
 StandardOutput=tty
 StandardError=tty
-TTYPath=/dev/ttyS0
+TTYPath=/dev/ttyS1
 TTYReset=yes
 TTYVHangup=yes
 """
@@ -83,6 +85,10 @@ def qemu_command(qemu, disk, seed, fs, port, memory_mib=2048, cpus=2):
                    f'guestfwd=tcp:10.0.2.100:3128-cmd:{relay}',
         '-device', 'virtio-net-pci,netdev=n',
         '-display', 'none', '-monitor', 'none',
+        # The first UART remains the kernel/system console. Only the second
+        # UART is attached to the user's terminal.
+        '-chardev', f'file,id=machine,path={Path(seed).parent}/machine.log',
+        '-serial', 'chardev:machine',
         '-chardev', 'stdio,id=console,signal=off', '-serial', 'chardev:console',
         '-no-reboot', '-drive', f'file={disk},format=qcow2,if=virtio',
         '-chardev', f'socket,id=fs,path={fs}',
@@ -235,6 +241,7 @@ def main():
         base.rmdir()
         sockets.rmdir()
         parser.error('workspace contains the runtime directory; choose a narrower workspace')
+    terminal_settings = None
     children = []
     helpers = []
     logs = []
@@ -345,8 +352,11 @@ def main():
 
         (base/'launch.json').write_text(json.dumps({'workspace': str(workspace), 'argv': command}, indent=2))
         if sys.stdin.isatty() and not (args.batch or args.verify):
+            terminal_settings = termios.tcgetattr(sys.stdin.fileno())
             previous_winch = signal.signal(signal.SIGWINCH, on_resize)
             write_size(report_dir, os.get_terminal_size(sys.stdin.fileno()))
+        if not (args.batch or args.verify):
+            print('Starting sandbox…', flush=True)
         vm = subprocess.Popen(command)
         children.append(vm)
         boot_deadline = time.monotonic()+args.boot_timeout
@@ -361,7 +371,7 @@ def main():
             if (args.batch or args.verify) and batch_deadline is not None and time.monotonic() > batch_deadline:
                 raise TimeoutError(f'guest command exceeded {command_timeout} seconds')
             if not (report_dir/'ready').exists() and time.monotonic() > boot_deadline:
-                raise TimeoutError(f'guest did not start within {args.boot_timeout} seconds; inspect console.log')
+                raise TimeoutError(f'guest did not start within {args.boot_timeout} seconds; inspect machine.log and console.log')
             check_helpers(vm, helpers)
             time.sleep(.2)
         if vm.returncode:
@@ -370,11 +380,11 @@ def main():
             exit_report = read_report(report_dir/'exit.json')
         except (OSError, ValueError) as exc:
             raise RuntimeError('guest stopped without a valid exit report; guest setup may have failed; '
-                               'inspect console.log and virtiofsd logs') from exc
+                               'inspect machine.log, console.log and virtiofsd logs') from exc
         if exit_report.get('error'):
             print('Guest setup failed: '+exit_report['error'], file=sys.stderr)
         if type(exit_report.get('returncode')) is not int:
-            raise RuntimeError('guest exit report has no integer return code; inspect console.log')
+            raise RuntimeError('guest exit report has no integer return code; inspect machine.log and console.log')
         success = exit_report['returncode'] == 0
         if args.verify and (report_dir/'verify.json').exists():
             print(json.dumps(read_report(report_dir/'verify.json'), indent=2))
@@ -393,6 +403,11 @@ def main():
                 except subprocess.TimeoutExpired:
                     child.kill()
                     child.wait()
+        if terminal_settings is not None:
+            try:
+                termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, terminal_settings)
+            except (OSError, termios.error):
+                pass  # The host terminal may have disconnected.
         if proxies:
             proxies.close()
         for log in logs:

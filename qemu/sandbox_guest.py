@@ -5,6 +5,7 @@ from pathlib import Path
 import pwd
 import shutil
 import subprocess
+import sys
 
 import fcntl
 import stat
@@ -117,6 +118,16 @@ def main():
         report['error'] = f'{type(exc).__name__}: {exc}'
         traceback.print_exc()
     finally:
+        # Flush the resume command and drain the serial driver before the
+        # service powers off the machine.
+        try:
+            for stream in (sys.stdout, sys.stderr):
+                stream.flush()
+            if os.isatty(1):
+                termios.tcdrain(1)
+        except (OSError, termios.error):
+            # A disconnected terminal must not prevent the exit report.
+            pass
         try:
             if os.geteuid() == 0:
                 user = pwd.getpwuid(1000)
