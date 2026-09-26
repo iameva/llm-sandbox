@@ -200,7 +200,7 @@ def main():
     parser.add_argument('--verify-image', action='store_true',
                         help='also check installed agents, tools and browsers (writes screenshots to the workspace)')
     parser.add_argument('--command', nargs=argparse.REMAINDER, help='exact guest command and arguments')
-    # Sized for cargo builds and two browsers; the guest's /tmp is a tmpfs
+    # Sized for cargo builds and a browser or two; the guest's /tmp is a tmpfs
     # that shares this memory.
     parser.add_argument('--memory-mib', type=bounded_integer(512, 1048576), default=8192)
     parser.add_argument('--cpus', type=bounded_integer(1, 1024), default=4)

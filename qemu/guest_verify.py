@@ -104,7 +104,7 @@ def tool_versions(environment):
 
 
 def browser_smoke(environment, output):
-    """Launch both baked browsers; the screenshots are for a human to inspect."""
+    """Launch each baked browser; the screenshots are for a human to inspect."""
     output.mkdir(parents=True, exist_ok=True)
     try:
         subprocess.run(['browser-smoke.mjs', str(output)], env=environment, stdin=subprocess.DEVNULL,

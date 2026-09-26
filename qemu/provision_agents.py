@@ -26,7 +26,10 @@ AGENTS = {
 # The retired Containerfile's package set. The browser libraries are the
 # real ldd closure of Playwright's Chromium (alsa-lib..pixman) and Firefox
 # (gtk3..libXcursor) builds; `playwright install --with-deps` only knows
-# Debian names. Without the fonts, screenshots draw symbols as boxes.
+# Debian names. The WebKit set (gstreamer1..vulkan-loader) maps Playwright's
+# own Ubuntu 24.04 WebKit list to Fedora names, less the three libraries
+# WEBKIT_UBUNTU_DEBS supplies. binutils and zstd unpack those. Without the
+# fonts, screenshots draw symbols as boxes.
 PACKAGES = [
     'git', 'ripgrep', 'nodejs', 'npm', 'curl', 'tar', 'gzip', 'unzip', 'xz', 'findutils',
     'which', 'gcc', 'make', 'python3-pip', 'strace', 'zsh', 'neovim', 'vim-enhanced', 'tree',
@@ -38,6 +41,12 @@ PACKAGES = [
     'libXrender', 'libdatrie', 'libdrm', 'libpng', 'libthai', 'libxcb', 'libxkbcommon',
     'mesa-libgbm', 'nspr', 'nss', 'nss-util', 'pango', 'pixman',
     'gtk3', 'cairo-gobject', 'gdk-pixbuf2', 'libXcursor',
+    'gstreamer1', 'gstreamer1-plugins-base', 'gstreamer1-plugins-good',
+    'gstreamer1-plugins-bad-free', 'gstreamer1-plugin-libav', 'gtk4', 'libatomic', 'enchant2',
+    'libepoxy', 'libevent', 'flite', 'libglvnd-gles', 'harfbuzz-icu', 'hyphen', 'lcms2',
+    'libmanette', 'opus', 'libsecret', 'libvpx', 'libwayland-client', 'libwayland-egl',
+    'libwayland-server', 'libwebp', 'woff2', 'libxml2', 'libxslt', 'libavif', 'vulkan-loader',
+    'binutils', 'zstd',
     'dejavu-sans-fonts', 'dejavu-sans-mono-fonts', 'dejavu-serif-fonts',
     'liberation-sans-fonts', 'liberation-serif-fonts', 'liberation-mono-fonts',
     'google-noto-sans-symbols-fonts', 'google-noto-sans-symbols-2-fonts',
@@ -48,8 +57,37 @@ PACKAGES = [
 # number and fails with "executable doesn't exist" for any other. Move the
 # version and a rebuild together.
 PLAYWRIGHT_VERSION = '1.63.0'
-PLAYWRIGHT_BROWSERS = ['firefox', 'chromium']
+PLAYWRIGHT_BROWSERS = ['firefox', 'chromium', 'webkit']
 PLAYWRIGHT_BROWSERS_PATH = '/opt/ms-playwright'
+
+# Fedora gets Playwright's Ubuntu 24.04 WebKit build. It links ICU 74 and
+# libjpeg.so.8; Fedora 44 ships ICU 77 and libjpeg.so.62, and ICU versions
+# every symbol, so no symlink bridges them. The Ubuntu copies go in WebKit's
+# own sys/lib, which its launcher already searches, and stay out of the
+# system library path. They need only libc and libstdc++.
+#
+# Playwright also refuses to launch WebKit unless `ldconfig -p` lists
+# libx264.so, which Fedora does not package. That check is the only reason
+# for libx264: video recording uses libvpx, and WebKit reaches x264 only
+# through a GStreamer plugin that is not installed. It goes in its own
+# directory on the system path.
+#
+# Hashes come from the noble and noble-updates package indexes, fetched
+# over HTTPS on 2026-09-26. A Playwright bump that moves off the Ubuntu
+# 24.04 build needs new pins.
+UBUNTU_POOL = 'https://archive.ubuntu.com/ubuntu/pool/'
+WEBKIT_UBUNTU_DEBS = {
+    'main/i/icu/libicu74_74.2-1ubuntu3.1_amd64.deb':
+        'c9a70989678660eed9a1e904c74fa043da8bec8e2036856fc16e31ced79b04f8',
+    'main/libj/libjpeg-turbo/libjpeg-turbo8_2.1.5-2ubuntu2_amd64.deb':
+        'f68b5b23bc8a1688fb787d2aed7e2cdf895a73022f6a5025e183162dac4500b2',
+}
+WEBKIT_UBUNTU_LIBRARIES = ['libicudata.so.74', 'libicui18n.so.74', 'libicuuc.so.74', 'libjpeg.so.8']
+X264_DEB = ('universe/x/x264/libx264-164_0.164.3108+git31e19f9-1_amd64.deb',
+            '7a410be6797c32357a2b7f0cc68ee14ae0e3b652bb17d16cdc941e4d830c7842')
+X264_LIBRARY = 'libx264.so.164'
+X264_DIRECTORY = '/usr/local/lib/playwright-x264'
+X264_LD_CONF = '/etc/ld.so.conf.d/playwright-x264.conf'
 
 # The build disk is resized before boot; cloud-init grows the root
 # filesystem. Fail early rather than halfway through the toolchain.
@@ -127,13 +165,79 @@ def install_playwright(env, proxy):
                     f'@playwright/test@{PLAYWRIGHT_VERSION}'],
                    env=env, stdin=subprocess.DEVNULL, check=True, timeout=600)
     stage('Downloading Playwright browsers')
-    # Ends with an ldd check of each browser, so a missing library fails here.
+    # Ends with an ldd check of each browser, but a missing library only
+    # prints a warning; the browser smoke test in guest_verify.py is the gate.
     prefix = subprocess.run(['npm', 'prefix', '--global'], env=env, capture_output=True,
                             text=True, check=True, timeout=60).stdout.strip()
     subprocess.run([f'{prefix}/bin/playwright', 'install', *PLAYWRIGHT_BROWSERS],
                    env={**env, 'PLAYWRIGHT_BROWSERS_PATH': PLAYWRIGHT_BROWSERS_PATH},
                    stdin=subprocess.DEVNULL, check=True, timeout=1800)
+    install_webkit_ubuntu_libraries(env)
     subprocess.run(['chmod', '-R', 'a+rX', PLAYWRIGHT_BROWSERS_PATH], check=True, timeout=120)
+
+
+def fetch_deb(pool_path, digest, env, directory):
+    deb = Path(directory)/Path(pool_path).name
+    subprocess.run(['curl', '-q', '--fail', '--silent', '--show-error', '--location',
+                    '--proto', '=https', '--proto-redir', '=https', '--connect-timeout', '20',
+                    '--max-time', '300', '--retry', '2', UBUNTU_POOL+pool_path, '--output', str(deb)],
+                   env=env, stdin=subprocess.DEVNULL, check=True, timeout=700)
+    with deb.open('rb') as stream:
+        if hashlib.file_digest(stream, 'sha256').hexdigest() != digest:
+            raise RuntimeError(f'{deb.name} does not match its pinned digest')
+    return deb
+
+
+def deb_libraries(deb, destination):
+    """Unpack a .deb's data archive; return its x86_64 library directory."""
+    members = subprocess.run(['ar', 't', str(deb)], capture_output=True, text=True,
+                             check=True, timeout=60).stdout.split()
+    data = [member for member in members if member.startswith('data.tar')]
+    if len(data) != 1:
+        raise RuntimeError(f'{Path(deb).name} does not have exactly one data archive')
+    destination = Path(destination)
+    (destination/'root').mkdir(parents=True)
+    subprocess.run(['ar', 'x', str(Path(deb).resolve()), data[0]], cwd=destination,
+                   check=True, timeout=60)
+    # tar recognises the compression from the file's first bytes.
+    subprocess.run(['tar', '-xf', data[0], '-C', 'root'], cwd=destination, check=True,
+                   timeout=120)
+    return destination/'root/usr/lib/x86_64-linux-gnu'
+
+
+def install_webkit_ubuntu_libraries(env, browsers_path=PLAYWRIGHT_BROWSERS_PATH,
+                                    x264_directory=X264_DIRECTORY, ld_conf=X264_LD_CONF,
+                                    ldconfig=True):
+    stage('Installing Ubuntu libraries for WebKit')
+    targets = sorted(Path(browsers_path).glob('webkit-*/minibrowser-*/sys/lib'))
+    if len(targets) != 2:
+        raise RuntimeError(f'expected the gtk and wpe WebKit sys/lib directories, found {targets}')
+    work = Path(browsers_path)/'.ubuntu-debs'
+    try:
+        work.mkdir()
+        found = {}
+        for pool_path, digest in WEBKIT_UBUNTU_DEBS.items():
+            libraries = deb_libraries(fetch_deb(pool_path, digest, env, work), work/Path(pool_path).stem)
+            found.update({name: libraries/name for name in WEBKIT_UBUNTU_LIBRARIES
+                          if (libraries/name).exists()})
+        if sorted(found) != sorted(WEBKIT_UBUNTU_LIBRARIES):
+            raise RuntimeError(f'Ubuntu packages lack {set(WEBKIT_UBUNTU_LIBRARIES) - set(found)}')
+        for target in targets:
+            for name, source in found.items():
+                # Copy the real file under its soname; the launcher needs nothing else.
+                shutil.copyfile(source, target/name)
+        libraries = deb_libraries(fetch_deb(*X264_DEB, env, work), work/'x264')
+        Path(x264_directory).mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(libraries/X264_LIBRARY, Path(x264_directory)/X264_LIBRARY)
+        Path(ld_conf).write_text(x264_directory+'\n')
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    if ldconfig:
+        subprocess.run(['ldconfig'], check=True, timeout=120)
+        listed = subprocess.run(['ldconfig', '-p'], capture_output=True, text=True,
+                                check=True, timeout=60).stdout
+        if X264_LIBRARY not in listed:
+            raise RuntimeError('ldconfig does not list libx264; Playwright will refuse WebKit')
 
 
 def install_rust(as_user, home):

@@ -34,7 +34,7 @@ function loadPlaywright() {
   throw new Error('cannot find @playwright/test locally or in the global npm root');
 }
 
-const { firefox, chromium } = loadPlaywright();
+const { firefox, chromium, webkit } = loadPlaywright();
 
 // The glyphs the apps actually use. U+FF0B is expected to stay tofu:
 // pulling ~100MB of CJK to draw one fullwidth plus is not worth it.
@@ -61,10 +61,11 @@ const url = `http://127.0.0.1:${server.address().port}/`;
 // Carried over from the container, where Chromium's own sandbox could not
 // start under gVisor and /dev/shm was 63M. The VM is the sandbox here. The
 // image boot check passed with these options; untested without them.
-// Firefox needs neither.
+// Firefox and WebKit need neither.
 const browsers = [
   ['firefox', firefox, {}],
   ['chromium', chromium, { chromiumSandbox: false, args: ['--disable-dev-shm-usage'] }],
+  ['webkit', webkit, {}],
 ];
 
 let failed = 0;

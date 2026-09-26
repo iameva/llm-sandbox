@@ -30,14 +30,15 @@ crates.io                                    # cargo API          1
 
 # --- Playwright browsers ---
 # Only needed to run `playwright install` inside the sandbox. The image
-# already ships Firefox and Chromium (qemu/provision_agents.py), so drop all
-# three lines unless you download browsers at runtime. They work as a set:
-# the CDN serves metadata and the other two serve the archives.
-# storage.googleapis.com is every public GCS bucket, not just
-# Playwright's, which makes it the widest grant in this file.
-# cdn.playwright.dev                           # release metadata  14
-# playwright.download.prss.microsoft.com       # browser archives   7
-# storage.googleapis.com                       # browser archives   4
+# ships Firefox and Chromium, and WebKit once it is rebuilt
+# (qemu/provision_agents.py); these stay on so a session can fetch a
+# browser the image lacks. They work as a set: the CDN serves metadata and
+# the other two serve the archives. storage.googleapis.com is every public
+# GCS bucket, not just Playwright's, which makes it the widest grant in
+# this file; comment all three out once the image carries what you need.
+cdn.playwright.dev                           # release metadata  14
+playwright.download.prss.microsoft.com       # browser archives   7
+storage.googleapis.com                       # browser archives   4
 
 # --- pi agent ---
 # Both the installer and, possibly, the agent's own

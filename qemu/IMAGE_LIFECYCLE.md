@@ -98,8 +98,9 @@ The first command only checks prerequisites and creates no files. The second:
 3. Grows the copy to a 30G virtual disk, then installs the current releases
    of Claude, Codex, Pi, OMP and OpenCode and the toolchain the old container
    image carried: Rust stable with `rust-src`, Go, Node and npm, Playwright
-   with Firefox and Chromium in `/opt/ms-playwright`, the browser libraries
-   and symbol fonts, and the CLI tools listed in `qemu/guest_verify.py`.
+   with Firefox, Chromium and WebKit in `/opt/ms-playwright`, the browser libraries
+   (plus pinned Ubuntu 24.04 libraries WebKit needs and Fedora lacks) and
+   symbol fonts, and the CLI tools listed in `qemu/guest_verify.py`.
    Agent and tool versions are recorded, not pinned in advance; Playwright is
    the exception, pinned in `qemu/provision_agents.py` because each release
    expects one browser build. Fedora dependencies come from the configured
