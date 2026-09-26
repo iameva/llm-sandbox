@@ -100,6 +100,10 @@ def session():
     if config.get('verify'):
         from guest_verify import verify
         return verify(mounts, sqlite_home, environment, config.get('verify_agents', False))
+    from guest_verify import omp_sqlite_checks
+    if not all(omp_sqlite_checks(mounts).values()):
+        raise RuntimeError('OMP shared state does not support SQLite WAL mapping; '
+                           'update the host launcher and virtiofsd, then run ,omp-sandbox.sh --check')
     command = config.get('command')
     if not command:
         command = ['bash', '--noprofile', '--norc', '-i'] if config['agent'] == 'shell' else [config['agent']]

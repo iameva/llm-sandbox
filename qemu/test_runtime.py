@@ -20,10 +20,73 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from qemu.runtime_support import disk_cache, finish_artifacts, prune_artifacts, write_size, validate_base_image
 from qemu.sandbox_guest import apply_terminal_size
 from qemu.network_relay import relay
-from qemu.sandbox import qemu_command, check_helpers, UNIT, USER_DATA
+from qemu.sandbox import (qemu_command, check_helpers, UNIT, USER_DATA,
+                          lock_omp_state, omp_state_mount, state_cache_options, require_omp_mapping)
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_omp_lock_blocks_another_process_and_releases_without_changing_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)/'omp'
+            state.mkdir()
+            existing = state/'agent.db'
+            existing.write_bytes(b'credentials must remain untouched')
+            alias = Path(directory)/'alias'
+            alias.symlink_to(state, target_is_directory=True)
+            code = ('import os,sys; from qemu.sandbox import lock_omp_state; '
+                    'os.close(lock_omp_state(sys.argv[1]))')
+            command = [sys.executable, '-c', code, str(alias.resolve())]
+            fd = lock_omp_state(state)
+            try:
+                result = subprocess.run(command, cwd=Path(__file__).resolve().parents[1],
+                                        capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('close the other OMP sandbox first', result.stderr)
+            finally:
+                os.close(fd)
+            subprocess.run(command, cwd=Path(__file__).resolve().parents[1], check=True, timeout=10)
+            self.assertEqual(list(state.iterdir()), [existing])
+            self.assertEqual(existing.read_bytes(), b'credentials must remain untouched')
+
+    def test_inherited_omp_lock_outlives_launcher_descriptor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fd = lock_omp_state(directory)
+            try:
+                child = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.read()'],
+                                         stdin=subprocess.PIPE, pass_fds=(fd,))
+            finally:
+                os.close(fd)
+            try:
+                with self.assertRaisesRegex(RuntimeError, 'already in use'):
+                    lock_omp_state(directory)
+            finally:
+                child.communicate(timeout=10)
+            os.close(lock_omp_state(directory))
+
+    def test_only_omp_state_gets_mapping_and_independent_state_locks_do_not_conflict(self):
+        self.assertTrue(omp_state_mount({'target': '/home/fedora/.omp'}))
+        for target in ('/home/fedora/.pi', '/home/fedora/.config/codex', '/mnt/report'):
+            self.assertFalse(omp_state_mount({'target': target}))
+        self.assertEqual(state_cache_options(), ['--cache=never'])
+        self.assertEqual(state_cache_options(True), ['--cache=never', '--allow-mmap'])
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+            fd = lock_omp_state(first)
+            try:
+                os.close(lock_omp_state(second))
+            finally:
+                os.close(fd)
+
+    def test_omp_preflight_requires_mapping_support(self):
+        for help_text, supported in [('usage: --cache --allow-mmap', True), ('usage: --cache', False)]:
+            with patch('qemu.sandbox.subprocess.run',
+                       return_value=subprocess.CompletedProcess([], 0, help_text, '')) as run:
+                if supported:
+                    require_omp_mapping('/host/virtiofsd')
+                else:
+                    with self.assertRaisesRegex(ValueError, 'update host virtiofsd'):
+                        require_omp_mapping('/host/virtiofsd')
+                self.assertEqual(run.call_args.args[0], ['/host/virtiofsd', '--help'])
+
     def test_helper_exit_before_qemu_exit_preserves_qemu_status(self):
         for status in (0, 3):
             with self.subTest(status=status):

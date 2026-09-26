@@ -45,8 +45,24 @@ def agent_versions(environment):
     return checks, versions
 
 
+def omp_sqlite_checks(mounts):
+    checks = {}
+    for mount in mounts:
+        target = Path(mount['target'])
+        if target == Path('/home/fedora/.omp'):
+            # Use a disposable database on the actual state filesystem;
+            # never open credentials or change an existing database.
+            try:
+                checks['omp_sqlite_wal'] = sqlite_wal_works(target)
+            except (OSError, sqlite3.Error) as exc:
+                checks['omp_sqlite_wal'] = False
+                print(f'OMP SQLite WAL check failed: {exc}', flush=True)
+    return checks
+
+
 def verify(mounts, sqlite_home, environment=None, agents=False):
     checks, versions = agent_versions(environment) if agents else ({}, {})
+    checks.update(omp_sqlite_checks(mounts))
     checks['uid_1000'] = os.getuid() == 1000
     try:
         checks['codex_sqlite_wal'] = sqlite_wal_works(sqlite_home)

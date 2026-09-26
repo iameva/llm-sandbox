@@ -156,7 +156,13 @@ class ImageTests(unittest.TestCase):
             directory = Path(command[command.index('--cache-dir')+1])/'run-test'
             directory.mkdir(parents=True)
             self.assertIn('--verify-agents', command)
-            self.assertNotIn('--mount', command)
+            mounts = [command[index+1].split(':', 1)
+                      for index, value in enumerate(command) if value == '--mount']
+            self.assertEqual({target for source, target in mounts},
+                             {'/home/fedora/.pi', '/home/fedora/.omp'})
+            for source, target in mounts:
+                self.assertTrue(Path(source).is_relative_to(self.root))
+                self.assertEqual(list(Path(source).iterdir()), [])
             self.assertNotIn('--env', command)
             images.atomic_json(directory/'verify.json', self.probe_report)
         reports = [

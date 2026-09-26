@@ -20,9 +20,11 @@ except ImportError:
     from runtime_support import disk_cache, private_directory, validate_base_image
 
 AGENTS = {'claude', 'codex', 'pi', 'omp', 'opencode'}
-REQUIRED_CHECKS = {'uid_1000', 'codex_sqlite_wal', 'one_default_route',
+REQUIRED_CHECKS = {'uid_1000', 'codex_sqlite_wal', 'omp_sqlite_wal', 'one_default_route',
                    'unlisted_connect_denied', 'direct_public_tcp_blocked',
                    'host_alias_tcp_blocked', 'writable:/workspace',
+                   'writable:/home/fedora/.pi',
+                   'writable:/home/fedora/.omp',
                    *(name+'_version' for name in AGENTS)}
 DEFAULT_CONFIG = Path.home()/'.config/llm-sandbox/qemu.json'
 
@@ -117,15 +119,23 @@ def verify_published(image):
 
 
 def probe(image, store):
-    """Boot a disposable candidate with no project, credentials or shared state."""
+    """Boot a disposable candidate with empty state and no project or credentials."""
     directory = Path(tempfile.mkdtemp(prefix='probe-', dir=store))
     workspace = directory/'workspace'
     workspace.mkdir(mode=0o700)
+    # Match runtime state mounts so they cannot hide installed executables
+    # after a successful image build.
+    state_arguments = []
+    for agent in ('pi', 'omp'):
+        state = directory/(agent+'-state')
+        state.mkdir(mode=0o700)
+        state_arguments.extend(['--mount', str(state)+f':/home/fedora/.{agent}'])
     allow = directory/'allow.txt'
     allow.write_text('example.com\n')
     print(f'Candidate boot-check artifacts: {directory}', flush=True)
     run_owned([sys.executable, str(Path(__file__).with_name('sandbox.py')),
                '--disk', str(image), '--workspace', str(workspace), '--allow-file', str(allow),
+               *state_arguments,
                '--cache-dir', str(directory/'runs'), '--keep-artifacts', '--verify-agents'], timeout=1800)
     reports = list((directory/'runs').glob('run-*/verify.json'))
     if len(reports) != 1:

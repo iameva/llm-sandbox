@@ -285,6 +285,30 @@ The image manager installs and runs the separate builder; launchers
 never download or build an image implicitly. Rebuild to add tools to the
 shared base image. Aider is not in the five-agent image and is rejected.
 
+The QEMU builder installs Pi with npm under `~/.local`, outside its shared
+`~/.pi` state directory. OMP is installed directly at `~/.local/bin/omp`,
+outside shared `~/.omp` state. Image activation checks both agents with empty
+state mounts to catch installations hidden during normal launches. If either
+agent fails with `No such file or directory` after an image update, run
+`sh install.sh` from the updated repository, then
+`,sandbox-image update --allow-downloads` to rebuild with this layout.
+
+OMP's `SQLITE_IOERR_SHMMAP` error is a separate runtime storage problem:
+its database needs WAL shared-memory mapping. The launcher now enables
+virtiofsd's `--allow-mmap` only for shared OMP state and holds an exclusive
+host lock until the VM and its state helper stop. A second OMP sandbox using
+the same state fails with a message to close the first. Other agents can
+still run concurrently. Credentials, settings and history stay in the same
+persistent host directory; there is no temporary copy or fork.
+
+Install this runtime fix with `sh install.sh`, then run
+`,omp-sandbox.sh --check` followed by `,omp-sandbox.sh`. No image rebuild is
+needed for this error. Host virtiofsd must support `--allow-mmap`; the launcher
+checks this before boot. SQLite WAL is tested on the shared filesystem before
+OMP starts and during image activation. Do not run host OMP, an older launcher,
+or another tool against this state while the sandbox is running: those tools
+do not honor the launcher lock. Stop old OMP sandboxes before using the fix.
+
 SANDBOX_PROXY does not select QEMU's proxy: every launch starts its own proxy
 in enforce mode. SANDBOX_ALLOW_FILE selects its allowlist; the default is the
 installed ~/.config/llm-sandbox/egress-allowlist.txt. Restart a run to load

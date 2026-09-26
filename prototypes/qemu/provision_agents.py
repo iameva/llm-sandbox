@@ -11,13 +11,17 @@ import traceback
 AGENTS = {
     'codex': ('https://chatgpt.com/codex/install.sh', ['sh']),
     'claude': (None, None),  # Official npm distribution; avoids the stalled bootstrap.
-    'pi': ('https://pi.dev/install.sh', ['sh']),
+    'pi': (None, None),  # Keep executables outside the shared ~/.pi state.
     'omp': ('https://omp.sh/install', ['sh']),
     'opencode': ('https://opencode.ai/install', ['bash']),
 }
 
 
 def claude_install_command(home, proxy):
+    return npm_install_command(home, proxy, '@anthropic-ai/claude-code')
+
+
+def npm_install_command(home, proxy, package):
     return [
         'npm', 'install', '--global', '--prefix', str(Path(home)/'.local'),
         '--registry=https://registry.npmjs.org',
@@ -25,8 +29,13 @@ def claude_install_command(home, proxy):
         '--fetch-timeout=60000', '--fetch-retries=2',
         '--fetch-retry-mintimeout=1000', '--fetch-retry-maxtimeout=10000',
         '--include=optional', '--no-audit', '--no-fund', '--loglevel=http',
-        '@anthropic-ai/claude-code',
+        package,
     ]
+
+
+def pi_install_command(home, proxy):
+    return [*npm_install_command(home, proxy, '@earendil-works/pi-coding-agent'),
+            '--ignore-scripts']
 
 
 def omp_asset(release):
@@ -124,6 +133,10 @@ def main():
         elif agent == 'claude':
             stage('Installing claude from npm')
             as_user(claude_install_command(user.pw_dir, proxy),
+                    stdin=subprocess.DEVNULL, timeout=600)
+        elif agent == 'pi':
+            stage('Installing pi from npm outside shared state')
+            as_user(pi_install_command(user.pw_dir, proxy),
                     stdin=subprocess.DEVNULL, timeout=600)
         else:
             stage(f'Downloading {agent} installer')

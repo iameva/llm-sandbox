@@ -9,10 +9,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from qemu.sandbox import USER_DATA, qemu_command, launch_settings
 from qemu.proxy_process import Processes
-from qemu.guest_verify import sqlite_wal_works, agent_versions
+from qemu.guest_verify import sqlite_wal_works, agent_versions, omp_sqlite_checks
 
 
 class SandboxTests(unittest.TestCase):
+    def test_omp_probe_checks_shared_filesystem_and_reports_mapping_failure(self):
+        mounts = [{'target': '/home/fedora/.omp'}]
+        with patch('qemu.guest_verify.sqlite_wal_works', return_value=True) as probe:
+            self.assertEqual(omp_sqlite_checks(mounts), {'omp_sqlite_wal': True})
+            probe.assert_called_once_with(Path('/home/fedora/.omp'))
+        with patch('qemu.guest_verify.sqlite_wal_works', side_effect=OSError('SHMMAP')):
+            self.assertEqual(omp_sqlite_checks(mounts), {'omp_sqlite_wal': False})
+        self.assertEqual(omp_sqlite_checks([]), {})
+
     def test_agent_version_timeout_or_empty_output_fails_but_checks_remaining_agents(self):
         environment = {'HOME': '/private-guest-home'}
         responses = [subprocess.CompletedProcess([], 0, 'claude 1\n'),

@@ -141,7 +141,8 @@ def main():
         monitor = BuildMonitor(base, share)
         while vm.poll() is None:
             monitor.poll()
-            check_helpers(vm, [daemon, proxy.children['build']])
+            check_helpers(vm, [('report virtiofsd', daemon),
+                               ('build HTTPS proxy', proxy.children['build'])])
             time.sleep(.5)
         report = read_report(share/'build-result.json')
         if report is None:

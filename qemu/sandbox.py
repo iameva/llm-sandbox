@@ -151,6 +151,37 @@ def check_helpers(vm, helpers, shutdown_grace=2):
                            + ', '.join(stopped) + '; stopping this VM') from exc
 
 
+def omp_state_mount(mount):
+    return Path(mount['target']) == Path('/home/fedora/.omp')
+
+
+def lock_omp_state(path):
+    """Lock the directory inode so aliases and different cache paths agree."""
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        os.close(fd)
+        raise RuntimeError('shared OMP state is already in use; close the other OMP sandbox first') from exc
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def state_cache_options(exclusive_omp=False):
+    # SQLite WAL needs shared mappings. Only the exclusively locked OMP
+    # export can opt in; project files and other state keep uncached I/O.
+    return ['--cache=never', *(['--allow-mmap'] if exclusive_omp else [])]
+
+
+def require_omp_mapping(virtiofsd):
+    result = subprocess.run([virtiofsd, '--help'], capture_output=True, text=True,
+                            check=True, timeout=10)
+    if '--allow-mmap' not in result.stdout:
+        raise ValueError('OMP requires virtiofsd with --allow-mmap support; update host virtiofsd')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--disk', type=Path, required=True, help='previously verified Fedora qcow2')
@@ -213,9 +244,11 @@ def main():
         maker = next((shutil.which(x) for x in ('genisoimage', 'xorrisofs', 'mkisofs') if shutil.which(x)), None)
         if not qemu or not maker or not shutil.which('qemu-img') or not os.access(args.virtiofsd, os.X_OK):
             raise ValueError('QEMU, qemu-img, virtiofsd and an ISO maker must already be installed')
+        if any(omp_state_mount(mount) for mount in settings['mounts']):
+            require_omp_mapping(args.virtiofsd)
         if not os.access('/dev/kvm', os.R_OK | os.W_OK):
             raise ValueError('KVM access required')
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
         parser.error(str(exc))
     exports_paths = [workspace, *[Path(m['source']) for m in settings['mounts']]]
     if any(cache.is_relative_to(path) for path in exports_paths):
@@ -247,6 +280,7 @@ def main():
     logs = []
     proxies = None
     vm_lock = None
+    omp_locks = {}
     success = False
     previous_winch = None
     resized = True
@@ -257,6 +291,11 @@ def main():
     try:
         for mount in settings['mounts']:
             Path(mount['source']).mkdir(mode=0o700, parents=True, exist_ok=True)
+            if omp_state_mount(mount):
+                omp_locks[mount['source']] = lock_omp_state(mount['source'])
+        if omp_locks:
+            print('Shared OMP state: exclusive access; do not open it from another VM or host OMP process.',
+                  flush=True)
         if vm_dir:
             vm_dir.mkdir(mode=0o700, parents=False, exist_ok=True)
             vm_lock = (vm_dir/'lock').open('a')
@@ -333,9 +372,10 @@ def main():
             logs.append(state_log)
             helper = subprocess.Popen([
                 args.virtiofsd, '--socket-path', str(socket_path), '--shared-dir', str(path),
-                '--sandbox=namespace', '--cache=never',
+                '--sandbox=namespace', *state_cache_options(str(path) in omp_locks),
                 f'--uid-map=:1000:{os.getuid()}:1:', f'--gid-map=:1000:{os.getgid()}:1:',
-            ], stdin=subprocess.DEVNULL, stdout=state_log, stderr=state_log, start_new_session=True)
+            ], stdin=subprocess.DEVNULL, stdout=state_log, stderr=state_log, start_new_session=True,
+                pass_fds=(omp_locks[str(path)],) if str(path) in omp_locks else ())
             children.append(helper)
             helpers.append((f'{tag} virtiofsd', helper))
             deadline = time.monotonic()+15
@@ -357,7 +397,8 @@ def main():
             write_size(report_dir, os.get_terminal_size(sys.stdin.fileno()))
         if not (args.batch or args.verify):
             print('Starting sandbox…', flush=True)
-        vm = subprocess.Popen(command)
+        # Keep the state locked if the launcher is killed before QEMU exits.
+        vm = subprocess.Popen(command, pass_fds=tuple(omp_locks.values()))
         children.append(vm)
         boot_deadline = time.monotonic()+args.boot_timeout
         command_timeout = args.batch_timeout or (900 if args.verify else 0)
@@ -414,6 +455,8 @@ def main():
             log.close()
         if vm_lock:
             vm_lock.close()
+        for fd in omp_locks.values():
+            os.close(fd)
         shutil.rmtree(sockets)
         keep = args.keep_artifacts or not success
         finish_artifacts(base, keep)
