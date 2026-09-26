@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Common runner for every sandboxed LLM agent.
+# Common runner for every sandboxed LLM agent. Each launch boots a
+# disposable QEMU VM from the image selected by ,sandbox-image.
 #
 # Invoked either with the agent name as the first argument:
 #     sandbox-run.sh claude --resume
@@ -8,13 +9,12 @@
 #     ,claude-sandbox.sh --resume
 #
 # --shell as the first argument runs an interactive shell instead of the
-# agent, with that agent's exact mounts, network and isolation:
+# agent, with that agent's exact mounts and network:
 #     ,claude-sandbox.sh --shell
 #     ,claude-sandbox.sh --shell -c 'ip route'
 #
-# --check runs the sandbox verification suite and exits non-zero if
-# anything fails:
-#     SANDBOX_ISOLATION=vm ,claude-sandbox.sh --check
+# --check boots the same configuration and runs the guest smoke checks:
+#     ,claude-sandbox.sh --check
 #
 # Backend options (before harness arguments):
 #   --backend NAME   Choose a profile from backends.json or a built-in profile.
@@ -25,119 +25,30 @@
 #   SANDBOX_BACKEND   Default backend for this invocation
 #   SANDBOX_MODEL     Model override for this invocation
 #   SANDBOX_BACKENDS_FILE  Alternate host path to backends.json
-#   SANDBOX_ISOLATION   container (default) | gvisor | vm | qemu
-#                       gvisor needs a hand-installed runsc; vm needs
-#                       crun-krun and /dev/kvm, and is currently broken
-#                       (see the uid note below).
-#   SANDBOX_RUNSC       path to runsc, if it is not on PATH. A bare name
-#                       (no '/') is treated as a runtime declared in
-#                       containers.conf and passed through untouched.
-#   SANDBOX_RUNSC_FLAGS global flags for runsc, default --ignore-cgroups.
-#                       Applied via a generated wrapper under $ROOT.
-#                       Empty means call runsc directly.
-#   SANDBOX_KRUN        path to krun, if it is not on PATH
-#   SANDBOX_PROXY       host:port of the egress proxy. When set, the
-#                       sandbox gets proxy variables for cooperating clients.
-#                       This does not block direct network connections.
-#                       A loopback address gets a pasta port forward, so
-#                       the proxy can stay bound to host loopback.
-#   SANDBOX_PASTA_FORWARD  0 to suppress that forward.
-#   SANDBOX_PROXY_PREFLIGHT  0 to skip the "is the proxy up?" check.
-#   SANDBOX_PROXY_MODE  log | enforce (default). Only affects what
-#                       --check expects: log mode allows everything, so
-#                       reaching a denied host is correct there.
-#   SANDBOX_LABEL_MODE  z (default, shared SELinux label) | Z (private —
-#                       breaks other containers sharing the same paths)
-#   SANDBOX_IMAGE       image name, default llm-sandbox
-#   SANDBOX_USERNS      passed to --userns verbatim; 'none' omits it.
-#                       Default keep-id in container mode,
-#                       keep-id:uid=0,gid=0 in vm mode.
-#   SANDBOX_USER        <uid>:<gid> for --user. Empty by default —
-#                       krun ignores it. Bisecting knob only.
-#   SANDBOX_TMP         host directory to bind at /tmp instead of using a
-#                       tmpfs. A tmpfs is RAM, and under SANDBOX_ISOLATION=vm
-#                       that RAM is charged to the guest's fixed allocation,
-#                       so a large build can OOM the VM. Defaults to a
-#                       per-run directory in vm mode, tmpfs otherwise.
-#                       The literal value 'tmpfs' forces a tmpfs in vm mode.
-#   SANDBOX_TMPFS_SIZE  size of the /tmp tmpfs when one is used, default 512M
-#   SANDBOX_CLAUDE_CONFIG_DIR  1 (default) keeps Claude Code's global
-#                       config inside the ~/.claude directory mount.
-#                       0 restores the old single-file mount of
-#                       ~/.claude.json, which corrupts it (see below).
-#   SANDBOX_DRY_RUN     1 to print the podman argv and exit
+#   SANDBOX_QEMU_CONFIG    Image selection, default ~/.config/llm-sandbox/qemu.json
+#   SANDBOX_QEMU_DISK      Explicit base image; overrides the selection
+#   SANDBOX_ALLOW_FILE     Egress allowlist, default the installed copy
+#   SANDBOX_QEMU_MEMORY_MIB, _CPUS, _BOOT_TIMEOUT, _BATCH_TIMEOUT,
+#   _IDLE_TIMEOUT, _CACHE_DIR, _KEEP_ARTIFACTS
+#                     Passed to qemu/sandbox.py; see README.
+#   SANDBOX_BATCH     1 for a noninteractive run
+#   SANDBOX_LLM_AGENTS  Agent state for ,llm-sandbox.sh, e.g. claude,codex
+#   SANDBOX_DRY_RUN   1 to print the runtime argv and exit
 
 set -euo pipefail
 
 ROOT="${HOME}/.config/llm-sandbox"
-IMAGE="${SANDBOX_IMAGE:-llm-sandbox}"
-ISOLATION="${SANDBOX_ISOLATION:-container}"
-# SELinux mount label. 'z' is a shared label; 'Z' is private to one
-# container.
-#
-# Default is 'z' despite 'Z' being the stronger choice, because 'Z'
-# revokes access for anything else using the same directory: mount a
-# tree that a running container also has, and that container loses it
-# until the labels are restored. Relabelling is persistent on disk, so
-# the damage outlives the run.
-#
-# Use 'Z' only when nothing else shares these paths. Repair a tree that
-# has already been relabelled with:  restorecon -RFv <dir>
-LABEL_MODE="${SANDBOX_LABEL_MODE:-z}"
-PROXY="${SANDBOX_PROXY:-}"
 DRY_RUN="${SANDBOX_DRY_RUN:-0}"
-
-# uid mapping.
-#
-# container mode: keep-id maps the invoking user to the same uid inside,
-# so a file written to /workspace belongs to you on the host, and the
-# process agrees about who it is. Verified 2026-08-06: id -u is 1000 and
-# files it creates read back as 1000.
-#
-# vm mode: keep-id, the least broken of three measured options — not a
-# working one. vm mode does not currently produce a usable sandbox.
-#
-# krun ignores the image's USER line, --user and --tmpfs, so the
-# entrypoint runs as uid 0 and cannot be moved. Measured 2026-08-06:
-#
-#   keep-id                writes succeed everywhere, but the process is
-#                          uid 0 and every file it creates reads back
-#                          uid 1000
-#   none                   /workspace not writable at all
-#   keep-id:uid=0,gid=0    /workspace not writable at all
-#   keep-id + --user 1000  identical to plain keep-id; --user ignored
-#
-# The reading — inference, not measurement — is that libkrun's virtiofs
-# does its own uid translation that podman's --userns does not drive, so
-# each mapping lands on a different broken combination rather than
-# composing. Under plain keep-id the guest's uid 0 is root within a
-# userns that has host 1000 mapped, which is why writes work there and
-# nowhere else.
-#
-# What this costs: any tool that compares its own uid against a file it
-# owns will refuse to run. Claude Code's temp directory check is one.
-# git's dubious-ownership check on /workspace is the next one waiting.
-#
-# Value is passed to --userns verbatim; 'none' omits the flag entirely.
-USERNS="${SANDBOX_USERNS:-keep-id}"
-# Process uid. Container mode honours the image's `USER appuser` and
-# needs nothing here. vm mode ignores --user, measured 2026-08-06, so
-# this defaults to empty everywhere and stays only as a bisecting knob.
-# Setting it under vm while USERNS maps to uid 0 would reintroduce the
-# mismatch if krun ever starts honouring it.
-RUN_USER="${SANDBOX_USER:-}"
-
-# Where Claude Code's global config lives. See claude_config_mounts below
-# for why the default moved.
-CLAUDE_CONFIG_IN_DIR="${SANDBOX_CLAUDE_CONFIG_DIR:-1}"
+HOME_IN_SANDBOX="/home/fedora"
 
 die() { echo "sandbox-run: $*" >&2; exit 1; }
 
-# Rootless systemd scopes do not provide a verified egress boundary here.
-# Reject the request before creating configuration or starting a container.
-if [[ "${SANDBOX_CONFINE:-0}" != "0" ]]; then
-    die "SANDBOX_CONFINE is unsupported: rootless scope filtering cannot be verified. No container was started. Unset it only if advisory proxying is acceptable."
-fi
+# The Podman modes (container, gvisor, vm) were removed. Refuse them rather
+# than quietly run something other than what was asked for.
+case "${SANDBOX_ISOLATION:-qemu}" in
+    qemu) ;;
+    *) die "SANDBOX_ISOLATION=${SANDBOX_ISOLATION} is no longer supported; QEMU is the only mode. Unset it." ;;
+esac
 
 # ---------------------------------------------------------------------
 # Agent name
@@ -193,7 +104,7 @@ done
 # Per-agent configuration
 #
 # MOUNTS entries are "<path under $ROOT>:<absolute path in sandbox>".
-# ENVS entries are "KEY=value".
+# ENVS entries are "KEY=value", or a bare KEY inherited from this process.
 # CMD is the argv to run inside the sandbox; "$@" is appended.
 # ---------------------------------------------------------------------
 
@@ -201,65 +112,23 @@ MOUNTS=()
 ENVS=()
 CMD=()
 
-HOME_IN_SANDBOX="/home/appuser"
-[[ "$ISOLATION" != "qemu" ]] || HOME_IN_SANDBOX="/home/fedora"
-
-# Set when Claude Code should read its global config from inside the
-# ~/.claude directory mount. Consumed after configure_agent, because
-# several branches there assign ENVS wholesale.
-WANT_CLAUDE_CONFIG_DIR=0
-
-# Where Claude Code will look for its global config inside the sandbox,
-# for --check to probe. Empty for agents that have no such config.
-GLOBAL_CONFIG_PATH=""
-
 # Mounts carrying Claude Code's credentials, appended to MOUNTS.
 #
-# Claude Code writes ~/.claude.json as temp-file + fsync + rename, with
-# the temp beside the target. Mounting the file on its own made it a
-# mount point, so its parent directory was a different device and every
-# rename onto it failed EXDEV. EXDEV is in Claude Code's fallback set, so
-# it dropped to a non-atomic in-place write: open(O_TRUNC), then write.
-# That truncates the live config before writing the replacement, and
-# anything that kills the process in that window — Ctrl-C, podman stop,
-# OOM, host reboot — leaves a 0-byte config on the host. Measured
-# 2026-09-01, after exactly that wiped a config: the file came back
-# 0 bytes and Claude Code reset it.
+# Claude Code writes its global config as temp-file + rename beside the
+# target. CLAUDE_CONFIG_DIR puts that config inside the directory mount, so
+# the rename stays on one filesystem and the write stays atomic. (A single-
+# file mount of ~/.claude.json made the rename fail EXDEV and fall back to
+# truncate-then-write, which wiped a config on 2026-09-01.)
 #
-# CLAUDE_CONFIG_DIR moves the global config to $CLAUDE_CONFIG_DIR/.claude.json,
-# which puts it inside the directory mount. Same device as its parent, so
-# the rename succeeds and the write is atomic again.
-#
-# The old layout stays reachable with SANDBOX_CLAUDE_CONFIG_DIR=0, and
-# the legacy config file is copied, never moved, so that rollback still
-# has its config.
-#
-# Arguments: <config dir under $ROOT> <legacy config file under $ROOT>
+# The legacy host file is copied, never moved, when the new one is absent
+# or empty, so a populated config is never lost.
 claude_config_mounts() {
-    local dir="$1" legacy_rel="$2"
-    MOUNTS+=("${dir}:${HOME_IN_SANDBOX}/.claude")
-
-    if [[ "$CLAUDE_CONFIG_IN_DIR" != "1" ]]; then
-        GLOBAL_CONFIG_PATH="${HOME_IN_SANDBOX}/.claude.json"
-        MOUNTS+=("${legacy_rel}:${HOME_IN_SANDBOX}/.claude.json")
-        # Seed valid JSON so podman mounts a file, not a directory.
-        if [[ "$DRY_RUN" != "1" ]]; then
-            mkdir -p "$ROOT/$(dirname "$legacy_rel")"
-            [[ -s "$ROOT/$legacy_rel" ]] || echo '{}' > "$ROOT/$legacy_rel"
-        fi
-        return
-    fi
-
-    WANT_CLAUDE_CONFIG_DIR=1
-    GLOBAL_CONFIG_PATH="${HOME_IN_SANDBOX}/.claude/.claude.json"
+    MOUNTS+=("claude:${HOME_IN_SANDBOX}/.claude")
     [[ "$DRY_RUN" == "1" ]] && return
 
-    local legacy="$ROOT/$legacy_rel"
-    local config="$ROOT/${dir}/.claude.json"
-    mkdir -p "$ROOT/${dir}"
-
-    # Only when missing or empty, so a populated config is never lost —
-    # and an empty one is replaced rather than handed over as corrupt.
+    local legacy="$ROOT/.claude.json"
+    local config="$ROOT/claude/.claude.json"
+    mkdir -p "$ROOT/claude"
     if [[ ! -s "$config" ]]; then
         if [[ -s "$legacy" ]]; then
             cp -p "$legacy" "$config"
@@ -274,16 +143,13 @@ configure_agent() {
     case "$1" in
     claude)
         MOUNTS=()
-        claude_config_mounts claude .claude.json
+        claude_config_mounts
         CMD=(claude --dangerously-skip-permissions)
         ;;
     codex)
-        # Not ~/.codex. That directory is codex's install root as well as
-        # its CODEX_HOME, so mounting over it hides the binary and the
-        # container fails to start. The image sets
-        # CODEX_HOME=~/.config/codex to separate the two; see the
-        # Containerfile. The host directory is unchanged, so existing
-        # credentials carry over.
+        # Not ~/.codex: that is codex's install root as well as its default
+        # CODEX_HOME, so mounting over it would hide the binary. The guest
+        # sets CODEX_HOME=~/.config/codex to separate the two.
         MOUNTS=(
             "codex:${HOME_IN_SANDBOX}/.config/codex"
             "orca:${HOME_IN_SANDBOX}/.orca"
@@ -303,13 +169,12 @@ configure_agent() {
             "opencode:${HOME_IN_SANDBOX}/.config/opencode"
             "local-opencode:${HOME_IN_SANDBOX}/.local/share/opencode"
         )
-        ENVS=("TODO_USER=${TODO_USER:-${USER:-appuser}}")
+        ENVS=("TODO_USER=${TODO_USER:-${USER:-fedora}}")
         CMD=(opencode)
         ;;
     llm)
-        # Interactive shell. Mounts no credentials by default: this used
-        # to carry every agent's config at once, which made it the widest
-        # credential exposure in the set. Name what you need:
+        # Interactive shell. Mounts no credentials by default; name what
+        # you need:
         #     SANDBOX_LLM_AGENTS=claude,codex ,llm-sandbox.sh
         MOUNTS=()
         local requested="${SANDBOX_LLM_AGENTS:-}"
@@ -322,9 +187,8 @@ configure_agent() {
         for w in "${want[@]}"; do
             case "$w" in
                 claude)
-                    claude_config_mounts claude .claude.json ;;
+                    claude_config_mounts ;;
                 codex)
-                    # ~/.config/codex, not ~/.codex; see the codex branch.
                     MOUNTS+=(
                         "codex:${HOME_IN_SANDBOX}/.config/codex"
                         "orca:${HOME_IN_SANDBOX}/.orca"
@@ -377,8 +241,9 @@ for ((i=0; i<${#backend_records[@]}; i+=2)); do
         arg) CMD+=("$value") ;;
         env) ENVS+=("$value") ;;
         secret)
-            # Podman inherits only this named value. Neither argv nor dry-run
-            # output contains the key, and it is not persisted to agent config.
+            # The runtime inherits only this named value. Neither argv nor
+            # dry-run output contains the key, and it is not persisted to
+            # agent config.
             export "$value"
             ENVS+=("${value%%=*}") ;;
         asset) BACKEND_ASSETS+=("${backend_helper%/*}/$value:/opt/sandbox/$value") ;;
@@ -394,616 +259,62 @@ unset backend_records value
 # Applies to every agent: drops telemetry and update-check traffic, which
 # keeps the egress allowlist short.
 ENVS+=("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1")
-
-# Set by claude_config_mounts. Kept out of configure_agent because the
-# per-agent configuration may assign ENVS wholesale.
-if [[ "$WANT_CLAUDE_CONFIG_DIR" == "1" ]]; then
-    ENVS+=("CLAUDE_CONFIG_DIR=${HOME_IN_SANDBOX}/.claude")
-fi
-
-# HOME. With the guest running as root, the runtime may hand it /root
-# rather than the image's /home/appuser — where every credential mount
-# lands. Stating it removes the question. vm only, so container argv is
-# unchanged.
-if [[ "$ISOLATION" == "vm" ]]; then
-    ENVS+=("HOME=${HOME_IN_SANDBOX}")
-fi
+ENVS+=("CLAUDE_CONFIG_DIR=${HOME_IN_SANDBOX}/.claude")
 
 # ---------------------------------------------------------------------
 # --shell and --check
 #
 # Both replace the agent's command while leaving every other setting
-# alone: same mounts, same network, same proxy, same isolation. That is
-# the point — debugging a different configuration than the agent runs
-# under tells you nothing about the agent.
+# alone: same mounts, same network, same proxy. Debugging a different
+# configuration than the agent runs under tells you nothing about the agent.
 # ---------------------------------------------------------------------
 
-read -r -d '' CHECK_SCRIPT <<'CHECK' || true
-fail=0
-say() { printf '%-28s %s\n' "$1" "$2"; }
-bad() { fail=1; say "$1" "FAIL  $2"; }
-
-# isolation mode is reported so a mode that silently did nothing is
-# visible rather than inferred.
-say "isolation" "$ISOLATION_MODE"
-
-if [ "$(uname -r)" = "$HOST_KERNEL" ]; then
-    if [ "$EXPECT_OWN_KERNEL" = "1" ]; then
-        bad "kernel" "same as host ($HOST_KERNEL) — asked for $ISOLATION_MODE, got a plain container"
-    else
-        say "kernel" "OK  $(uname -r), shared with host (container mode)"
-    fi
-else
-    say "kernel" "OK  guest $(uname -r), host $HOST_KERNEL"
-fi
-
-# /proc/net/dev first: gVisor's netstack does not populate
-# /sys/class/net, so reading only sysfs reports "none" on a sandbox with
-# perfectly good networking. /sys is the fallback, not the source.
-devs=""
-while read -r first _rest; do
-    case "$first" in
-        *:*) n="${first%%:*}"; [ -n "$n" ] && devs="$devs$n " ;;
-    esac
-done < /proc/net/dev 2>/dev/null
-[ -z "$devs" ] && devs=$(ls /sys/class/net 2>/dev/null | tr '\n' ' ')
-say "network devices" "${devs:-none}"
-
-# Read routes from /proc directly. iproute2 is not in the image, so
-# anything shelling out to `ip` reports a false negative here.
-gw=none
-while read -r iface dest gwhex rest; do
-    [ "$dest" = "00000000" ] || continue
-    gw="$((0x${gwhex:6:2})).$((0x${gwhex:4:2})).$((0x${gwhex:2:2})).$((0x${gwhex:0:2})) via $iface"
-    break
-done < /proc/net/route 2>/dev/null
-say "default route" "$gw"
-
-if [ -s /etc/resolv.conf ] && grep -q '^nameserver' /etc/resolv.conf 2>/dev/null; then
-    say "dns" "present — expected only when SANDBOX_PROXY is unset"
-else
-    say "dns" "OK  no resolver"
-fi
-
-say "proxy env" "${HTTPS_PROXY:-unset}"
-
-say "process uid" "$(id -u) ($(id -un 2>/dev/null || echo '?'))"
-say "home" "${HOME:-unset}"
-
-# Credential mounts must be where the agent will look for them and
-# readable by whoever the process turned out to be. Under vm the guest
-# runs as root with a HOME the runtime chose, so neither is a given.
-# ${=...} because this runs under zsh, which does not word-split.
-for m in ${=CHECK_MOUNTS:-}; do
-    if [ ! -e "$m" ]; then
-        bad "mount $m" "missing"
-    elif [ ! -r "$m" ]; then
-        bad "mount $m" "present but not readable"
-    else
-        say "mount $m" "OK  readable"
-    fi
-done
-
-# Claude Code replaces its global config with rename(temp, config), the
-# temp staged beside it. If the config is its own mount, its parent is a
-# different device, that rename fails EXDEV, and Claude Code falls back to
-# a non-atomic open(O_TRUNC)+write that leaves a 0-byte config if the
-# process dies mid-write. That is not hypothetical: it wiped a config on
-# 2026-09-01. Comparing the two device numbers catches it without writing
-# anything.
-if [ -n "${GLOBAL_CONFIG:-}" ]; then
-    cfg_dir=$(dirname "$GLOBAL_CONFIG")
-    if [ ! -e "$GLOBAL_CONFIG" ]; then
-        bad "config atomic write" "$GLOBAL_CONFIG missing"
-    elif [ ! -s "$GLOBAL_CONFIG" ]; then
-        bad "config atomic write" "$GLOBAL_CONFIG is 0 bytes — already wiped"
-    elif [ "$(stat -c %d "$GLOBAL_CONFIG")" != "$(stat -c %d "$cfg_dir")" ]; then
-        bad "config atomic write" \
-            "$GLOBAL_CONFIG is its own mount; rename from $cfg_dir is EXDEV, so writes are non-atomic and can truncate it. Drop SANDBOX_CLAUDE_CONFIG_DIR=0 to get the safe layout back."
-    else
-        say "config atomic write" "OK  $GLOBAL_CONFIG shares a device with $cfg_dir"
-    fi
-fi
-
-# A file the process just created must read back owned by that process.
-# Anywhere this fails, the uid mapping is wrong, and any tool that checks
-# who owns its own files refuses to run. Claude Code does exactly that
-# for its temp directory, which is how this was first found.
-own_check() {
-    dir="$1"
-    label="$2"
-    if ! probe=$(mktemp "$dir/.sandbox-ownership-probe.XXXXXX" 2>/dev/null); then
-        bad "$label" "cannot write $dir"
-        return
-    fi
-    puid=$(stat -c %u "$probe")
-    pgid=$(stat -c %g "$probe")
-    rm -f "$probe"
-    if [ "$puid" = "$(id -u)" ]; then
-        say "$label" "OK  uid $puid gid $pgid — compare on the host"
-    else
-        bad "$label" "process is uid $(id -u) but its own file reads back uid $puid — uid mapping is inconsistent; try SANDBOX_USERNS"
-    fi
-}
-
-own_check /workspace "workspace write"
-own_check /tmp "tmp write"
-
-say "tmp backing" "$(stat -f -c %T /tmp 2>/dev/null || echo unknown)"
-
-if [ -n "${HTTPS_PROXY:-}" ]; then
-    # curl prints %{http_code} even when it fails, so the old
-    # `curl ... || echo 000` appended a second 000 and produced "000000".
-    # That matched neither branch of the comparison and inverted both
-    # verdicts: a dead proxy read as OK, a correct refusal read as FAIL.
-    # Keep the fallback inside the substitution.
-    probe_http() {
-        curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$1" 2>/dev/null || true
-    }
-
-    # Reachability first. A denied host and an unreachable proxy both
-    # surface as http 000, so without this they are indistinguishable.
-    # A plain GET to the proxy is not CONNECT, so the proxy answers 405 —
-    # any reply at all proves the path works.
-    code=$(probe_http "$HTTPS_PROXY")
-    case "$code" in
-        ""|000) bad "proxy reachable" "no reply from $HTTPS_PROXY — is it running, and is the port forwarded in?" ;;
-        *)      say "proxy reachable" "OK  http $code from the proxy itself" ;;
-    esac
-
-    code=$(probe_http https://api.anthropic.com/v1/messages)
-    case "$code" in
-        ""|000) bad "egress allowed host" "no response — proxy down, or this host is not on the allowlist" ;;
-        *)      say "egress allowed host" "OK  http $code" ;;
-    esac
-
-    # In log mode the proxy allows everything on purpose — that is how
-    # the real allowlist gets learned. Reaching a denied host is then the
-    # correct result, not a failure, and calling it one would train you
-    # to ignore this line during the week that matters most.
-    # Inspect the proxy's CONNECT response. HTTP 000 also covers DNS, TLS,
-    # and transport failures, so it cannot establish a policy refusal.
-    connect_code=$(curl -s -o /dev/null -w '%{http_connect}' --max-time 15 \
-        --proxy "$HTTPS_PROXY" --noproxy '' https://example.com/ 2>/dev/null || true)
-    if [ "${PROXY_MODE:-enforce}" = "log" ]; then
-        if [ "$connect_code" = "200" ]; then
-            say "egress denied host" "OK  CONNECT accepted, expected in log mode"
-        else
-            bad "egress denied host" "expected CONNECT 200 in log mode, got $connect_code"
-        fi
-    elif [ "$connect_code" = "403" ]; then
-        say "egress denied host" "OK  proxy explicitly refused CONNECT"
-    else
-        bad "egress denied host" "expected CONNECT 403, got $connect_code; refusal is not verified"
-    fi
-fi
-
-# HTTP failures cannot prove that direct connections are blocked.
-say "network policy" "ADVISORY  this runner does not enforce direct egress restrictions"
-
-echo
-[ "$fail" = 0 ] && echo "all checks passed" || echo "SOME CHECKS FAILED"
-exit "$fail"
-CHECK
-
+VERIFY=0
 if [[ "${SANDBOX_SHELL:-}" == "1" || "${1:-}" == "--shell" ]]; then
     [[ "${1:-}" == "--shell" ]] && shift
     CMD=(zsh)
 elif [[ "${SANDBOX_CHECK:-}" == "1" || "${1:-}" == "--check" ]]; then
-    # HOST_KERNEL lets the guest tell whether it is really a guest.
-    # EXPECT_OWN_KERNEL decides whether a shared kernel is a failure or
-    # just container mode working as asked. Both vm and gvisor report a
-    # kernel of their own — gVisor's Sentry answers uname itself — so a
-    # kernel matching the host means the runtime silently did nothing.
-    [[ "$ISOLATION" != "qemu" ]] || IS_QEMU_CHECK=1
-    ENVS+=("HOST_KERNEL=$(uname -r)")
-    ENVS+=("ISOLATION_MODE=$ISOLATION")
-    ENVS+=("EXPECT_OWN_KERNEL=$([[ "$ISOLATION" == "container" ]] && echo 0 || echo 1)")
-    check_mounts=""
-    for m in ${MOUNTS[@]+"${MOUNTS[@]}"}; do
-        check_mounts+="${m#*:} "
-    done
-    ENVS+=("CHECK_MOUNTS=${check_mounts% }")
-    ENVS+=("GLOBAL_CONFIG=${GLOBAL_CONFIG_PATH}")
-    # The sandbox cannot tell whether the proxy is logging or enforcing,
-    # and the two have opposite expectations for a denied host.
-    ENVS+=("PROXY_MODE=${SANDBOX_PROXY_MODE:-enforce}")
-    CMD=(zsh -c "$CHECK_SCRIPT")
+    VERIFY=1
+    CMD=(true)
     set --
 fi
 
-# QEMU uses the same harness plan and live state directories, with a
-# private overlay and proxy per invocation. It never enters Podman's path.
-if [[ "$ISOLATION" == "qemu" ]]; then
-    [[ "$CLAUDE_CONFIG_IN_DIR" == "1" ]] || die "QEMU requires SANDBOX_CLAUDE_CONFIG_DIR=1"
-    qemu_runner="$script_dir/qemu/sandbox.py"
-    [[ -f "$qemu_runner" ]] || qemu_runner="$ROOT/qemu/sandbox.py"
-    [[ -f "$qemu_runner" ]] || die "QEMU launcher is missing; rerun install.sh"
-    qemu_disk="${SANDBOX_QEMU_DISK:-}"
-    if [[ -z "$qemu_disk" ]]; then
-        qemu_config="${SANDBOX_QEMU_CONFIG:-$ROOT/qemu.json}"
-        qemu_disk=$(python3 "${qemu_runner%/*}/images.py" --config "$qemu_config" path) || exit 1
-    fi
-    qemu_allow="${SANDBOX_ALLOW_FILE:-$ROOT/egress-allowlist.txt}"
-    qargv=(python3 "$qemu_runner" --disk "$qemu_disk"
-           --workspace "$PWD" --allow-file "$qemu_allow")
-    [[ "${SANDBOX_BATCH:-0}" != "1" ]] || qargv+=(--batch)
-    for setting in MEMORY_MIB CPUS BOOT_TIMEOUT BATCH_TIMEOUT IDLE_TIMEOUT CACHE_DIR; do
-        variable="SANDBOX_QEMU_$setting"
-        value="${!variable:-}"
-        option="${setting,,}"
-        [[ -z "$value" ]] || qargv+=("--${option//_/-}" "$value")
-    done
-    [[ "${SANDBOX_QEMU_KEEP_ARTIFACTS:-0}" != "1" ]] || qargv+=(--keep-artifacts)
-    for m in "${MOUNTS[@]}"; do
-        qargv+=(--mount "$ROOT/${m%%:*}:${m#*:}")
-    done
-    for e in "${ENVS[@]}"; do qargv+=(--env "$e"); done
-    for asset in "${BACKEND_ASSETS[@]}"; do qargv+=(--asset "$asset"); done
-    if [[ "${SANDBOX_CHECK:-}" == "1" || "${IS_QEMU_CHECK:-0}" == "1" ]]; then
-        qargv+=(--verify)
-        CMD=(true)
-    fi
-    qargv+=(--command "${CMD[@]}" "$@")
-    if [[ "$DRY_RUN" == "1" ]]; then
-        printf '%q ' "${qargv[@]}"
-        printf '\n'
-        exit 0
-    fi
-    exec "${qargv[@]}"
-fi
-
 # ---------------------------------------------------------------------
-# Build the podman argv
+# Launch
+#
+# Each invocation gets a private overlay, network stack and enforcing
+# proxy; agent state directories are shared live.
 # ---------------------------------------------------------------------
 
-argv=(podman run --rm -it)
-if [[ "$USERNS" != "none" ]]; then
-    argv+=("--userns=$USERNS")
+qemu_runner="$script_dir/qemu/sandbox.py"
+[[ -f "$qemu_runner" ]] || qemu_runner="$ROOT/qemu/sandbox.py"
+[[ -f "$qemu_runner" ]] || die "QEMU launcher is missing; rerun install.sh"
+qemu_disk="${SANDBOX_QEMU_DISK:-}"
+if [[ -z "$qemu_disk" ]]; then
+    qemu_config="${SANDBOX_QEMU_CONFIG:-$ROOT/qemu.json}"
+    qemu_disk=$(python3 "${qemu_runner%/*}/images.py" --config "$qemu_config" path) || exit 1
 fi
-if [[ -n "$RUN_USER" ]]; then
-    argv+=(--user "$RUN_USER")
-fi
-argv+=(--workdir /workspace)
-
-# Find an OCI runtime and return something podman will accept.
-#
-# Normally an absolute path. But an override with no '/' is passed
-# through as a runtime *name*, because that is the only way to attach
-# arguments to a runtime: podman's --runtime takes a path with no room
-# for flags, so a runtime needing them has to be declared in
-# containers.conf and referenced by name.
-#
-#   [engine.runtimes]
-#   runsc = ["/home/you/.local/bin/runsc", "--ignore-cgroups"]
-#
-#   SANDBOX_RUNSC=runsc ,claude-sandbox.sh --check
-#
-#
-# Always an absolute path, never a bare name: podman resolves a bare name
-# against its configured runtimes, and neither crun-krun nor a
-# hand-installed runsc reliably registers one. That failure reads as
-#   Error: default OCI runtime "krun" not found: invalid argument
-# which looks like the runtime is missing when it is merely unregistered.
-#
-# /var/usrlocal/bin is where /usr/local/bin points on Fedora Atomic, and
-# ~/.local/bin is where an unprivileged install lands. Both are searched
-# because on an image-based OS a hand-installed runtime cannot go in
-# /usr/bin.
-find_runtime() {
-    local override="$1"; shift
-    local candidate dir
-    if [[ -n "$override" ]]; then
-        echo "$override"
-        return
-    fi
-    for candidate in "$@"; do
-        if command -v "$candidate" >/dev/null 2>&1; then
-            command -v "$candidate"
-            return
-        fi
-    done
-    for candidate in "$@"; do
-        for dir in /usr/bin /usr/local/bin /var/usrlocal/bin "$HOME/.local/bin"; do
-            if [[ -x "$dir/$candidate" ]]; then
-                echo "$dir/$candidate"
-                return
-            fi
-        done
-    done
-    echo ""
-}
-
-case "$ISOLATION" in
-    container)
-        ;;
-    gvisor)
-        # gVisor serves the guest's syscalls from a userspace kernel, so
-        # reaching the host kernel needs a Sentry bug plus defeating its
-        # seccomp filter. Weaker than the KVM boundary vm mode was after,
-        # much stronger than a shared kernel.
-        #
-        # Chosen over krun because it implements the OCI spec rather than
-        # ignoring parts of it. krun drops USER, --user and --tmpfs, which
-        # is what left vm mode unusable. Whether runsc honours them is the
-        # thing --check is for; do not assume it.
-        runsc_bin="$(find_runtime "${SANDBOX_RUNSC:-}" runsc)"
-        [[ "$runsc_bin" != */* || -x "$runsc_bin" ]] || \
-            die "SANDBOX_RUNSC=$runsc_bin is not an executable file"
-        [[ -n "$runsc_bin" ]] || die \
-"no runsc runtime found.
-
-  Look for it:      command -v runsc; ls -l /var/usrlocal/bin/runsc ~/.local/bin/runsc
-  Point at it:      SANDBOX_RUNSC=/path/to/runsc
-
-gVisor is not packaged for Fedora, so this is a hand-installed binary.
-Container mode still works: unset SANDBOX_ISOLATION."
-
-        # Rootless cgroups. podman writes a systemd cgroup path into the
-        # spec, runsc tries to create the scope on the *system* bus, and
-        # polkit refuses because nothing can prompt:
-        #   creating container: systemd error: Access denied as the
-        #   requested operation requires interactive authentication.
-        # --ignore-cgroups skips cgroup setup, which is what gVisor
-        # documents for rootless.
-        #
-        # podman's --runtime takes a path with no room for flags. The
-        # documented alternative is declaring a named runtime with args
-        # in ~/.config/containers/containers.conf, but that is config
-        # this script does not own and would have to merge into. A
-        # generated wrapper under $ROOT keeps the flags local and
-        # leaves global podman config alone.
-        #
-        # SANDBOX_RUNSC_FLAGS overrides; empty skips the wrapper. A
-        # SANDBOX_RUNSC given as a bare name is left alone, since that
-        # is the containers.conf route and carries its own args.
-        if [[ -n "${SANDBOX_RUNSC_FLAGS+x}" ]]; then
-            RUNSC_FLAGS="$SANDBOX_RUNSC_FLAGS"
-        else
-            RUNSC_FLAGS="--ignore-cgroups"
-        fi
-
-        if [[ -n "$RUNSC_FLAGS" && "$runsc_bin" == */* ]]; then
-            runsc_wrapper="$ROOT/runsc-wrapper"
-            if [[ "$DRY_RUN" != "1" ]]; then
-                mkdir -p "$ROOT"
-                printf '#!/bin/sh\n# Generated by sandbox-run.sh. Set SANDBOX_RUNSC_FLAGS to change.\nexec %q %s "$@"\n' \
-                    "$runsc_bin" "$RUNSC_FLAGS" > "$runsc_wrapper"
-                chmod 0755 "$runsc_wrapper"
-            fi
-            runsc_bin="$runsc_wrapper"
-        fi
-
-        argv+=(--runtime "$runsc_bin")
-
-        # runsc cannot read an OCI spec carrying an SELinux label and
-        # refuses the whole run:
-        #   FetchSpec failed: reading spec: SELinux is not supported:
-        #   system_u:system_r:container_t:s0:c181,c430
-        # podman sets that label by default, so it has to come off. Not
-        # optional, and not a preference.
-        #
-        # The cost is real: SELinux type enforcement no longer confines
-        # the sandbox process on the host. Under gvisor the Sentry is the
-        # boundary instead, and gVisor applies its own seccomp filter to
-        # the Sentry, so host-side syscall confinement remains — but a
-        # layer that container mode has is gone. Weigh that when
-        # comparing the two modes; it is not a free swap.
-        #
-        # Volume relabelling (the z/Z suffix) is left alone. It changes
-        # labels on the host, which stays consistent with container mode.
-        argv+=(--security-opt label=disable)
-        ;;
-    vm)
-        # libkrun boots each run as a microVM with its own kernel, so a
-        # container escape is a VMM bug rather than a kernel LPE.
-        # vm mode is not usable yet: krun runs the entrypoint as uid 0
-        # while virtiofs stamps files uid 1000, and no --userns mapping
-        # reconciles them. See the note above and legacy/vm-migration-plan.md.
-        # Loud on purpose — silently handing back a broken sandbox is how
-        # the 2026-08-04 "verified" claim happened.
-        if [[ "${SANDBOX_VM_ACK:-}" != "1" && "${SANDBOX_CHECK:-}" != "1" && "${CMD[0]}" != "zsh" ]]; then
-            echo "sandbox-run: WARNING — vm mode has a known uid mismatch (process 0, files 1000)." >&2
-            echo "sandbox-run: agents that check ownership will refuse to start. Set SANDBOX_VM_ACK=1 to silence." >&2
-        fi
-
-        [[ -e /dev/kvm ]] || die "SANDBOX_ISOLATION=vm needs /dev/kvm"
-        [[ -r /dev/kvm && -w /dev/kvm ]] || \
-            die "/dev/kvm is not readable and writable by you; add yourself to the 'kvm' group"
-
-        # Pass an absolute path rather than the name. Podman resolves a
-        # bare "krun" against its configured runtimes, and the package
-        # does not always register one, which fails as:
-        #   Error: default OCI runtime "krun" not found: invalid argument
-        krun_bin="$(find_runtime "${SANDBOX_KRUN:-}" krun crun-krun)"
-        [[ "$krun_bin" != */* || -x "$krun_bin" ]] || \
-            die "SANDBOX_KRUN=$krun_bin is not an executable file"
-        [[ -n "$krun_bin" ]] || die \
-"no krun runtime found.
-
-  Look for it:      rpm -qa | grep -iE 'krun|libkrun'
-                    ls -l /usr/bin/krun /usr/bin/crun-krun 2>/dev/null
-  Install it:       sudo dnf install crun-krun
-  Point at it:      SANDBOX_KRUN=/path/to/krun
-
-Container mode still works: unset SANDBOX_ISOLATION."
-
-        argv+=(--runtime "$krun_bin")
-        ;;
-    *)
-        die "SANDBOX_ISOLATION must be 'container', 'gvisor' or 'vm', got '$ISOLATION'"
-        ;;
-esac
-
-# pasta, never host. --network=host would drop the network namespace and
-# expose every service on the host's loopback and LAN.
-#
-# Reaching the proxy is the awkward part. 127.0.0.1 inside the sandbox is
-# the sandbox, not the host, and host loopback is unreachable by design —
-# confirmed by the standing regression test, where `curl localhost:8000`
-# against a host server must fail. That isolation is wanted, but it also
-# blocks a proxy listening on host loopback.
-#
-# pasta's -T forwards a port from the namespace to the host's loopback,
-# so 127.0.0.1:<port> inside reaches 127.0.0.1:<port> outside — and
-# nothing else does. That keeps the proxy bound to host loopback rather
-# than exposed on the LAN, which is the alternative.
-#
-# Only for a loopback SANDBOX_PROXY: a proxy already on a routable
-# address needs no help. SANDBOX_PASTA_FORWARD=0 disables it.
-pasta_opts=""
-if [[ -n "$PROXY" ]]; then
-    proxy_host="${PROXY%:*}"
-    proxy_port="${PROXY##*:}"
-    case "$proxy_host" in
-        127.*|localhost|::1|"[::1]")
-            if [[ "${SANDBOX_PASTA_FORWARD:-1}" == "1" ]]; then
-                pasta_opts="-T,${proxy_port}"
-            fi
-            ;;
-    esac
-fi
-
-# The forward works under container mode and cannot work under gvisor.
-# Measured 2026-08-06, probing the proxy from inside each:
-#   container, http://127.0.0.1:9090   -> 405   (reached it)
-#   gvisor,    http://127.0.0.1:9090   -> 000
-#   gvisor,    http://192.168.86.1:9090 -> 000
-# gVisor runs its own network stack, so 127.0.0.1 inside the sandbox is
-# gVisor's loopback, not the namespace's. pasta's -T listener sits in the
-# kernel netns, which gVisor never touches — everything it sends goes out
-# the tap to pasta, which then connects from the host. Only an address
-# the sandbox can route to is reachable.
-if [[ -n "$pasta_opts" && "$ISOLATION" == "gvisor" ]]; then
-    echo "sandbox-run: WARNING — a loopback SANDBOX_PROXY cannot be reached under gvisor." >&2
-    echo "sandbox-run: gVisor has its own network stack, so pasta's port forward is invisible to it." >&2
-    echo "sandbox-run: Bind the proxy to a host address the sandbox can route to. See legacy/vm-migration-plan.md." >&2
-fi
-
-if [[ -n "$pasta_opts" ]]; then
-    argv+=("--network=pasta:${pasta_opts}")
-else
-    argv+=(--network=pasta)
-fi
-
-argv+=(-v "$PWD:/workspace:${LABEL_MODE},rw")
-for m in "${MOUNTS[@]}"; do
-    source_path="$ROOT/${m%%:*}"
-    if [[ "$DRY_RUN" != "1" && ! -e "$source_path" ]]; then
-        mkdir -p -- "$source_path"
-        chmod 0700 -- "$source_path"
-    fi
-    argv+=(-v "$ROOT/${m%%:*}:${m#*:}:${LABEL_MODE},rw")
+qemu_allow="${SANDBOX_ALLOW_FILE:-$ROOT/egress-allowlist.txt}"
+qargv=(python3 "$qemu_runner" --disk "$qemu_disk"
+       --workspace "$PWD" --allow-file "$qemu_allow")
+[[ "${SANDBOX_BATCH:-0}" != "1" ]] || qargv+=(--batch)
+for setting in MEMORY_MIB CPUS BOOT_TIMEOUT BATCH_TIMEOUT IDLE_TIMEOUT CACHE_DIR; do
+    variable="SANDBOX_QEMU_$setting"
+    value="${!variable:-}"
+    option="${setting,,}"
+    [[ -z "$value" ]] || qargv+=("--${option//_/-}" "$value")
 done
-for asset in "${BACKEND_ASSETS[@]}"; do
-    argv+=(-v "$asset:${LABEL_MODE},ro")
+[[ "${SANDBOX_QEMU_KEEP_ARTIFACTS:-0}" != "1" ]] || qargv+=(--keep-artifacts)
+for m in ${MOUNTS[@]+"${MOUNTS[@]}"}; do
+    qargv+=(--mount "$ROOT/${m%%:*}:${m#*:}")
 done
-
-if [[ -n "$PROXY" ]]; then
-    # Cooperating clients let the proxy resolve hostnames. This option
-    # does not prevent direct DNS requests or connections to literal IPs.
-    argv+=(--dns=none)
-    ENVS+=(
-        "HTTPS_PROXY=http://${PROXY}"
-        "HTTP_PROXY=http://${PROXY}"
-        "https_proxy=http://${PROXY}"
-        "http_proxy=http://${PROXY}"
-        "NO_PROXY=localhost,127.0.0.1"
-    )
-fi
-
-for e in "${ENVS[@]}"; do
-    argv+=(-e "$e")
-done
-
-# /tmp. A tmpfs lives in RAM. Under a container that RAM is the host's,
-# and elastic. Under a VM it comes out of the guest's fixed allocation,
-# where a build that writes a few hundred megabytes to /tmp turns into an
-# OOM kill. So vm mode gets a disk-backed /tmp by default.
-#
-# Measured 2026-08-06: krun ignores --tmpfs. SANDBOX_TMP=tmpfs passes it
-# and /tmp still reports `fuse`. The same is true of the --tmpfs /run
-# below, which is why /run is not writable in vm mode. So under vm the
-# OOM argument above is moot — every path is virtiofs whatever we ask
-# for — and the bind mount is doing nothing the runtime would not have
-# done anyway. Keep it for container mode, where --tmpfs is honoured.
-TMP_DIR="${SANDBOX_TMP:-}"
-TMPFS_SIZE="${SANDBOX_TMPFS_SIZE:-512M}"
-cleanup_tmp=""
-
-# SANDBOX_TMP=tmpfs forces the tmpfs branch. Without it that branch is
-# unreachable once ISOLATION=vm, which makes it impossible to tell a
-# /tmp problem caused by the bind mount from one caused by the VM.
-# Under vm this is diagnostic only: krun ignores --tmpfs, so it changes
-# which mount is requested, not what the guest ends up with.
-if [[ "$TMP_DIR" == "tmpfs" ]]; then
-    TMP_DIR=""
-elif [[ -z "$TMP_DIR" && "$ISOLATION" == "vm" ]]; then
-    if [[ "$DRY_RUN" == "1" ]]; then
-        TMP_DIR="$ROOT/tmp/${AGENT}.XXXXXX"
-    else
-        mkdir -p "$ROOT/tmp"
-        # Per-run and removed on exit, so /tmp stays as ephemeral as the
-        # tmpfs it replaces.
-        TMP_DIR="$(mktemp -d "$ROOT/tmp/${AGENT}.XXXXXX")"
-        cleanup_tmp="$TMP_DIR"
-    fi
-fi
-
-if [[ -n "$TMP_DIR" ]]; then
-    argv+=(-v "$TMP_DIR:/tmp:${LABEL_MODE},rw")
-else
-    argv+=(--tmpfs "/tmp:rw,size=${TMPFS_SIZE}")
-fi
-
-argv+=(--tmpfs /run:rw,size=16M
-       "$IMAGE"
-       "${CMD[@]}" "$@")
-
-# ---------------------------------------------------------------------
-# Proxy preflight
-#
-# Setting a proxy directs cooperating clients to it. An agent launched
-# against a dead proxy cannot make its normal API calls. The failure
-# surfaces as whatever that agent does when every API call times out, rarely
-# "the proxy is not running". One TCP connect turns that into a sentence.
-#
-# It also protects the log-mode soak. A session that runs without the
-# proxy leaves a gap in the log, and an allowlist built from a log with
-# gaps is missing hosts that are actually needed — which only shows up
-# later, at enforce time, as a broken agent.
-#
-# SANDBOX_PROXY_PREFLIGHT=0 skips it.
-# ---------------------------------------------------------------------
-
-if [[ -n "$PROXY" && "$DRY_RUN" != "1" && "${SANDBOX_PROXY_PREFLIGHT:-1}" == "1" ]]; then
-    pf_host="${PROXY%:*}"
-    pf_port="${PROXY##*:}"
-    pf_cmd=(bash -c 'exec 3<>"/dev/tcp/$1/$2"' sandbox-proxy-preflight "$pf_host" "$pf_port")
-    if command -v timeout >/dev/null 2>&1; then
-        pf_cmd=(timeout 2 "${pf_cmd[@]}")
-    fi
-    if ! "${pf_cmd[@]}" 2>/dev/null; then
-        die "SANDBOX_PROXY=$PROXY is not accepting connections.
-
-  Start it:   ,egress-proxy.py --mode log --listen $PROXY
-  Check it:   ss -lntp | grep '$pf_port'
-
-Clients using this proxy would be unable to reach their APIs. Skip this check with SANDBOX_PROXY_PREFLIGHT=0."
-    fi
-fi
-
+for e in "${ENVS[@]}"; do qargv+=(--env "$e"); done
+for asset in ${BACKEND_ASSETS[@]+"${BACKEND_ASSETS[@]}"}; do qargv+=(--asset "$asset"); done
+[[ "$VERIFY" != "1" ]] || qargv+=(--verify)
+qargv+=(--command "${CMD[@]}" "$@")
 if [[ "$DRY_RUN" == "1" ]]; then
-    printf '%q ' "${argv[@]}"
+    printf '%q ' "${qargv[@]}"
     printf '\n'
     exit 0
 fi
-
-if [[ -z "$cleanup_tmp" ]]; then
-    exec "${argv[@]}"
-fi
-
-trap 'rm -rf -- "$cleanup_tmp"' EXIT
-rc=0
-"${argv[@]}" || rc=$?
-exit "$rc"
+exec "${qargv[@]}"

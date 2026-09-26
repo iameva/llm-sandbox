@@ -58,9 +58,10 @@ const server = http.createServer((_req, res) => {
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const url = `http://127.0.0.1:${server.address().port}/`;
 
-// Chromium's own sandbox does not start under gVisor, so it is off here and
-// the container is the sandbox. /dev/shm is 63M, too small for Chromium's
-// default. Firefox needs neither accommodation.
+// Carried over from the container, where Chromium's own sandbox could not
+// start under gVisor and /dev/shm was 63M. The VM is the sandbox here. The
+// image boot check passed with these options; untested without them.
+// Firefox needs neither.
 const browsers = [
   ['firefox', firefox, {}],
   ['chromium', chromium, { chromiumSandbox: false, args: ['--disable-dev-shm-usage'] }],

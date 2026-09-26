@@ -130,8 +130,7 @@ class BackendRunnerTests(RunnerFixture):
         for harness in ['claude', 'codex', 'pi', 'omp', 'opencode']:
             with self.subTest(harness=harness):
                 self.assertEqual(self.launch(harness).returncode, 0)
-                native = self.argv()
-                mounts = [native[i + 1] for i, item in enumerate(native) if item == '-v']
+                mounts = self.values('--mount')
                 result = self.launch(harness, '--backend', 'deepseek', '--resume', 'session-id')
                 self.assertEqual(result.returncode, 0, result.stderr)
                 changed = self.argv()
@@ -163,7 +162,7 @@ class BackendRunnerTests(RunnerFixture):
                                 env=self.env, cwd=REPO, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         root = self.home / '.config/llm-sandbox'
-        self.assertIn(f'{root}/claude:/home/appuser/.claude:z,rw', self.argv())
+        self.assertIn(f'{root}/claude:/home/fedora/.claude', self.values('--mount'))
         self.assertFalse((root / 'deepseek-claude').exists())
 
     def test_model_override_and_invalid_backend(self):

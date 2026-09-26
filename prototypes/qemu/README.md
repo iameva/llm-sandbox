@@ -409,8 +409,8 @@ restricted, IPv6 remains disabled in QEMU, and no host ports are forwarded.
 This broader build policy is not copied into normal sandbox launches.
 
 Inside the build VM, signed Fedora packages provide development dependencies.
-The same five vendor installer URLs used by Containerfile install current
-agent releases as UID 1000. Downloaded installers execute only in that VM.
+The recipe in `qemu/provision_agents.py` installs current agent releases
+and the toolchain as UID 1000. Downloaded installers execute only in that VM.
 These releases are not version-pinned; manifest.json records their reported
 versions and the resulting image SHA256. The build performs no logins.
 

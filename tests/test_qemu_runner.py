@@ -9,9 +9,7 @@ from test_runner import RunnerFixture, REPO
 
 class QemuRunnerTests(RunnerFixture):
     def qemu(self, agent, *args, **env):
-        return self.launch(agent, *args, SANDBOX_ISOLATION='qemu',
-                           SANDBOX_QEMU_DISK='/images/agents.qcow2',
-                           SANDBOX_DRY_RUN='1', **env)
+        return self.launch(agent, *args, SANDBOX_DRY_RUN='1', **env)
 
     def test_same_agent_launches_share_state_but_select_no_common_disk(self):
         first = self.qemu('codex', '--resume', 'two words')
@@ -23,7 +21,6 @@ class QemuRunnerTests(RunnerFixture):
         self.assertNotIn('--vm-dir', argv)
         self.assertIn(str(self.home/'.config/llm-sandbox/codex')+':/home/fedora/.config/codex', argv)
         self.assertEqual(argv[-4:], ['codex', '--dangerously-bypass-approvals-and-sandbox', '--resume', 'two words'])
-        self.assertNotIn('podman', argv)
         self.assertFalse(self.capture.exists())
 
     def test_shell_and_check_keep_agent_state(self):
@@ -45,8 +42,7 @@ class QemuRunnerTests(RunnerFixture):
 
     def test_installed_entry_uses_installed_qemu_runtime(self):
         result = subprocess.run([str(self.home/'.local/bin/,omp-sandbox.sh')],
-                                env={**self.env, 'SANDBOX_ISOLATION': 'qemu',
-                                     'SANDBOX_QEMU_DISK': '/images/agents.qcow2', 'SANDBOX_DRY_RUN': '1'},
+                                env={**self.env, 'SANDBOX_DRY_RUN': '1'},
                                 cwd=REPO, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(str(self.home/'.config/llm-sandbox/qemu/sandbox.py'), shlex.split(result.stdout))
@@ -64,8 +60,8 @@ class QemuRunnerTests(RunnerFixture):
             self.assertEqual(argv[argv.index('--'+option)+1], value)
         self.assertIn('--keep-artifacts', argv)
 
-    def test_missing_image_setting_fails_without_podman(self):
-        result = self.launch('codex', SANDBOX_ISOLATION='qemu', SANDBOX_DRY_RUN='1')
+    def test_missing_image_setting_fails_before_launch(self):
+        result = self.launch('codex', SANDBOX_QEMU_DISK='', SANDBOX_DRY_RUN='1')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('SANDBOX_QEMU_DISK', result.stderr)
         self.assertFalse(self.capture.exists())
@@ -76,7 +72,7 @@ class QemuRunnerTests(RunnerFixture):
         image.chmod(0o400)
         config = self.home/'.config/llm-sandbox/qemu.json'
         config.write_text(json.dumps({'version': 1, 'active_image': str(image)}))
-        result = self.launch('codex', SANDBOX_ISOLATION='qemu', SANDBOX_DRY_RUN='1')
+        result = self.launch('codex', SANDBOX_QEMU_DISK='', SANDBOX_DRY_RUN='1')
         self.assertEqual(result.returncode, 0, result.stderr)
         argv = shlex.split(result.stdout)
         self.assertEqual(argv[argv.index('--disk')+1], str(image))

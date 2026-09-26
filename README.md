@@ -1,19 +1,23 @@
 # LLM sandbox
 
-Run coding agents in a rootless Podman container with the current project mounted at `/workspace`. Agent settings and credentials persist under `~/.config/llm-sandbox` on the host. Agents can modify the mounted project and their own mounted configuration.
+Run coding agents in a disposable QEMU virtual machine with the current project mounted at `/workspace`. Agent settings and credentials persist under `~/.config/llm-sandbox` on the host. Agents can modify the mounted project and their own mounted configuration; every other change inside the VM is discarded when it exits.
 
 ## Set up and update
 
-Run these commands on the **host**, from this repository. You need Linux, rootless Podman with pasta networking, Bash, and Python 3 for the proxy and tests. Add `~/.local/bin` to your PATH.
+Run these commands on the **host**, from this repository, as your normal user. You need Linux with KVM access, QEMU (`qemu-system-x86_64`, `qemu-img`), virtiofsd with `--allow-mmap` support, an ISO maker (genisoimage, xorrisofs or mkisofs), GNU coreutils, Bash and Python 3. Add `~/.local/bin` to your PATH.
 
 ```sh
-./build.sh --no-cache
-./install.sh
+sh install.sh
+,sandbox-image configure --source-disk /path/to/verified-fedora-44-cloud.qcow2
+,sandbox-image update --check
+,sandbox-image update --allow-downloads
 ```
 
-Agent installers intentionally fetch current releases. Rebuild with `--no-cache` to update them; `install.sh` updates host launchers and the allowlist, not binaries inside an existing image. Rebuilding does not change running containers. The Fedora base digest and Playwright version remain explicit in `Containerfile`; update Playwright and its baked browser downloads together.
+`install.sh` installs the launchers, the image manager and the runtime; it never builds or downloads an image. `,sandbox-image update` builds a new image in an isolated build VM, boots it to check every agent, tool and both browsers, then selects it for future launches. Running VMs keep their base. Rerun `install.sh` after pulling changes, and `update` to refresh agents and tools. See the [image lifecycle](qemu/IMAGE_LIFECYCLE.md) for configuration, staged activation and rollback.
 
-`install.sh` backs up a differing installed allowlist to `egress-allowlist.txt.bak` before replacing it. Restart a running proxy after updating its code or allowlist.
+The image holds Claude, Codex, Pi, OMP and OpenCode at their current releases, plus Rust stable (with `rust-src`), Go, Node and npm, zsh, Neovim, Vim and the other tools listed in `qemu/guest_verify.py`. Playwright's Firefox and Chromium live read-only in `/opt/ms-playwright` (`PLAYWRIGHT_BROWSERS_PATH`); a project pinned to another Playwright version should point that variable under `/workspace`. The Playwright version is pinned in `qemu/provision_agents.py`, because each release expects one browser build. Packages installed during a session disappear with its VM; change the recipe and rebuild to keep them.
+
+`install.sh` backs up a differing installed allowlist to `egress-allowlist.txt.bak` before replacing it. Each launch loads the allowlist when it starts.
 
 ## Run an agent
 
@@ -27,7 +31,7 @@ Change into the project you want to work on, then run an installed entry point:
 ,omp-sandbox.sh
 ```
 
-Missing configuration directories are created on first launch. Authenticate from inside the appropriate sandbox using the agent's own login flow. Codex configuration is mounted at `/home/appuser/.config/codex`, separate from its executable installation. Claude's global JSON configuration lives inside its mounted directory so file replacement is atomic; a legacy configuration is copied only when the new file is absent or empty.
+Missing configuration directories are created on first launch. Authenticate from inside the appropriate sandbox using the agent's own login flow. Codex configuration is mounted at `/home/fedora/.config/codex`, separate from its executable installation. Claude's global JSON configuration lives inside its mounted directory so file replacement is atomic; a legacy configuration is copied only when the new file is absent or empty.
 
 `,deepseek-claude-code.sh` is an alias for Claude with the DeepSeek backend. It shares Claude's configuration and sessions, and reads the DeepSeek key from `DEEPSEEK_API_KEY` or the host file `~/.config/deepseek.api`.
 
@@ -38,7 +42,7 @@ Every agent supports `--shell` as its first argument. `,llm-sandbox.sh` opens a 
 SANDBOX_DRY_RUN=1 ,codex-sandbox.sh --resume
 ```
 
-Dry runs print command arguments without loading backend API keys. Credentials supplied by the backend selector are passed to Podman by environment variable name, not embedded in its arguments.
+Dry runs print the runtime arguments without loading backend API keys. Credentials supplied by the backend selector are passed to the runtime by environment variable name, not embedded in its arguments.
 
 ## Switch backends and resume sessions
 
@@ -154,53 +158,30 @@ This combination requires a separately configured gateway that exposes the Anthr
 }
 ```
 
-Then run `,claude-sandbox.sh --backend gpt-gateway --resume`. The credential is the gateway credential, which need not be your OpenAI API key. The gateway must be reachable from the container. A host-loopback gateway needs its own forwarding setup; the egress proxy's port forwarding does not forward an additional gateway port. The egress allowlist may also need the gateway hostname. A ChatGPT login is not a substitute for this gateway configuration.
+Then run `,claude-sandbox.sh --backend gpt-gateway --resume`. The credential is the gateway credential, which need not be your OpenAI API key. The gateway must be a public HTTPS host on the egress allowlist. The proxy refuses private and loopback destinations, so a gateway running on the host is not reachable from the VM. A ChatGPT login is not a substitute for this gateway configuration.
 
 The direct DeepSeek adapters use its [Anthropic-compatible endpoint](https://api-docs.deepseek.com/guides/anthropic_api/) for Claude Code and its [Responses endpoint](https://api-docs.deepseek.com/guides/responses_api/) for Codex. Pi and OMP load a temporary provider registration from a read-only mounted extension; no model configuration files or session paths are replaced. DeepSeek's [OMP integration guide](https://api-docs.deepseek.com/quick_start/agent_integrations/oh_my_pi/) describes the tool-call compatibility fields used here. Registered custom models currently use zero cost metadata, so harness cost estimates are not a billing estimate. Check the provider's usage dashboard for actual charges.
 
 ## Network policy
 
-The runner uses pasta networking. Setting `SANDBOX_PROXY` configures cooperating clients to use the proxy; **it does not block direct connections or direct DNS traffic**. The proxy's enforce mode filters only traffic sent through that proxy. An external network boundary may impose additional restrictions, but the runner does not establish or verify those restrictions.
+Each launch starts its own egress proxy in enforce mode. The VM has QEMU user networking with `restrict=on`: its only route out is that proxy, which accepts HTTPS `CONNECT` to hosts on the allowlist and refuses everything else, including private destinations. `SANDBOX_ALLOW_FILE` selects the allowlist; the default is the installed `~/.config/llm-sandbox/egress-allowlist.txt`. Restart a run to load allowlist changes. The proxy never intercepts TLS.
 
-The former `SANDBOX_CONFINE=1` implementation relied on rootless systemd scope filtering that the repository records as ineffective. It now exits before starting a container. `SANDBOX_CONFINE_ACK` does not override that failure. Leave confinement unset only when advisory proxying is acceptable; this repository currently has no supported enforced egress mode for the whole sandbox.
-
-To use the proxy, start it on the host:
+Each run records proxy decisions in `sandbox.process-decisions.jsonl` in its run directory. Keep it with `SANDBOX_QEMU_KEEP_ARTIFACTS=1`, then draft a candidate allowlist from it:
 
 ```sh
-,egress-proxy.py --mode enforce --listen 127.0.0.1:8080
+,egress-proxy.py --summarize --log ~/.cache/llm-sandbox/qemu/run-XXXX/sandbox.process-decisions.jsonl
 ```
 
-In another host terminal:
+Only events recorded after a successful upstream connection become active entries. Review the result before replacing the repository copy.
 
-```sh
-SANDBOX_PROXY=127.0.0.1:8080 ,claude-sandbox.sh
-SANDBOX_PROXY=127.0.0.1:8080 ,claude-sandbox.sh --check
-```
+## Verification
 
-Container mode forwards that loopback port through pasta. A loopback proxy is not reachable through this forwarding mechanism in gVisor mode; use an appropriately restricted address reachable from that sandbox instead.
-
-For discovery, run the proxy with `--mode log` and checks with `SANDBOX_PROXY_MODE=log`. Review a candidate allowlist before replacing the repository copy:
-
-```sh
-,egress-proxy.py --summarize > candidate-allowlist.txt
-```
-
-Only events recorded after a successful upstream connection become active entries. Older `allow` and `allow-unlisted` events remain commented out because they did not prove connection success. The proxy rejects private destinations even in log mode.
-
-## Isolation modes and verification
-
-| Mode | Status |
-| --- | --- |
-| `container` | Default rootless Podman container; shares the host kernel. |
-| `gvisor` | Requires runsc; disables SELinux labeling for runtime compatibility. Test on the host. |
-| `vm` | Experimental and known to have ownership and mount problems with krun. Not a supported daily-use mode. |
-
-The runner's comments describe additional environment settings, including runtime paths, temporary storage, and SELinux mount labels. `legacy/` holds the container-era plans and host probes (`vm-migration-plan.md`, `network-restriction-plan.md`, `host_assumptions.py`, `host_uds_boundary.py`); they record history, not current guarantees.
-
-Run local regression tests from this repository; these need no Podman, credentials, or public network:
+Run local regression tests from this repository; they start no VM and need no credentials or public network:
 
 ```sh
 python3 -B -m unittest discover -s tests -v
+python3 -B -m unittest discover -s qemu -v
+python3 -B -m unittest discover -s prototypes/qemu -v
 ```
 
 With Pi and OMP installed, an optional test sends requests only to a local fake API with dummy credentials:
@@ -209,53 +190,25 @@ With Pi and OMP installed, an optional test sends requests only to a local fake 
 SANDBOX_NATIVE_TESTS=1 python3 -B -m unittest discover -s tests -p test_native_adapters.py -v
 ```
 
-`./test-argv.sh` runs the launcher subset. The tests check ordered arguments, installed entry points, fresh configuration, backend selection, shared session paths, legacy imports, credential handling, error propagation, proxy policy responses, and successful-connection logging.
+`./test-argv.sh` runs the launcher subset: ordered arguments, installed entry points, fresh configuration, backend selection, shared session paths, legacy imports, credential handling and error propagation.
 
-On the host, after rebuilding and installing, run each agent's `--check`. It checks mounts, ownership, and proxy responses. It explicitly reports network policy as advisory and does not certify egress confinement.
+On the host, run each agent's `--check`. It boots that agent's configuration and checks identity, state access, SQLite WAL access, proxy denial and direct TCP failures. It is a smoke check, not a certification of isolation.
 
 ```sh
 ,codex-sandbox.sh --check
 ,claude-sandbox.sh --check
-,opencode-sandbox.sh --shell -c 'opencode --version'
 ,llm-sandbox.sh --shell -c 'browser-smoke.mjs /workspace'
 ```
 
-Inspect the generated browser screenshots for missing glyphs. The default image includes Firefox and Chromium; a custom image built with only one browser will fail the smoke test for the omitted browser.
+Inspect the browser screenshots for missing glyphs: only the fullwidth plus should draw as a box.
 
-## QEMU backend
+`legacy/` holds the plans and host probes from the retired Podman workflow; they record history, not current guarantees.
 
-QEMU is available as an opt-in isolation mode for Claude, Codex, Pi, OMP,
-OpenCode and the agent shell. Install the launcher files with the existing
-installer. The image manager records the selected version in
-`~/.config/llm-sandbox/qemu.json` and checks each update before selecting it.
-The builder publishes a read-only `agents.qcow2` after its structure check,
-SHA-256 digest and manifest.
-The launcher rejects any base image with owner, group or other write permission;
-it does not rehash the image on every launch. File permissions prevent accidental
-writes, but do not prove provenance or stop the owner from changing permissions.
+## QEMU runtime
 
-```sh
-sh install.sh
-,sandbox-image configure --source-disk /path/to/verified-fedora-44-cloud.qcow2
-,sandbox-image update --check
-,sandbox-image update --allow-downloads
-unset SANDBOX_QEMU_DISK
-export SANDBOX_ISOLATION=qemu
-export SANDBOX_ALLOW_FILE="$PWD/egress-allowlist.txt"
-,codex-sandbox.sh
-```
+`,sandbox-image` keeps the image selection in `~/.config/llm-sandbox/qemu.json`, and `SANDBOX_QEMU_DISK` overrides it for one run. The builder publishes a read-only `agents.qcow2` after its structure check, SHA-256 digest and manifest. The launcher rejects any base image with owner, group or other write permission; it does not rehash the image on every launch. File permissions prevent accidental writes, but do not prove provenance or stop the owner from changing permissions.
 
-The source path above is a placeholder. If you already have a published
-image, use `,sandbox-image activate /path/to/agents.qcow2` instead of building.
-For the recovered `building.qcow2`, use `,sandbox-image adopt PATH`; it checks
-and publishes a copy without rebuilding. See the [image lifecycle](qemu/IMAGE_LIFECYCLE.md)
-for that exact command, configuration, updates, staged activation and rollback.
-Updates affect future launches; running VMs retain their original base.
-`SANDBOX_QEMU_DISK` remains an explicit override of the configured selection.
-
-The current directory becomes /workspace. The same backend/model arguments
-and per-agent directories under ~/.config/llm-sandbox are used as by the
-existing launchers. Two Codex commands can run concurrently in the same
+The current directory becomes /workspace. Two Codex commands can run concurrently in the same
 directory: each gets an independent disposable disk overlay, QEMU network stack
 and enforcing proxy, while both intentionally share project files and
 Codex state. Workspace and shared agent-state changes persist. Other guest
@@ -276,23 +229,8 @@ not coordinate background work across VMs; concurrent updates to the remaining
 shared Codex files have not been validated. Remove any explicit `sqlite_home`
 setting in Codex config, which otherwise overrides this environment variable.
 
-No Podman, pasta, host firewall changes, or sudo are used by QEMU launches.
-QEMU, qemu-img, virtiofsd, GNU stat (coreutils), KVM access and an ISO maker
-must be installed already.
-The image manager installs and runs the separate builder; launchers
-never download or build an image implicitly. Rebuild to add tools to the
-shared base image.
-
-The image carries the old container's toolchain: Rust stable (`~/.cargo/bin`
-on PATH, with `rust-src`), Go, Node and npm, zsh, Neovim, Vim, and the other
-tools listed in `qemu/guest_verify.py`. Playwright's Firefox and Chromium live
-read-only in `/opt/ms-playwright` (`PLAYWRIGHT_BROWSERS_PATH`); a project
-pinned to another Playwright version should point that variable under
-/workspace. Run `,llm-sandbox.sh --shell -c 'browser-smoke.mjs /workspace'`
-and inspect the screenshots for missing glyphs. Packages installed during a
-session disappear with its overlay; rebuild to keep them. Images published
-before the toolchain was added still boot and pass activation, so rollback
-to them works; `zsh` falls back to bash there.
+Launches use no host firewall changes or sudo, and never download or build
+an image implicitly.
 
 The QEMU builder installs Pi with npm under `~/.local`, outside its shared
 `~/.pi` state directory. OMP is installed directly at `~/.local/bin/omp`,
@@ -318,19 +256,15 @@ OMP starts and during image activation. Do not run host OMP, an older launcher,
 or another tool against this state while the sandbox is running: those tools
 do not honor the launcher lock. Stop old OMP sandboxes before using the fix.
 
-SANDBOX_PROXY does not select QEMU's proxy: every launch starts its own proxy
-in enforce mode. SANDBOX_ALLOW_FILE selects its allowlist; the default is the
-installed ~/.config/llm-sandbox/egress-allowlist.txt. Restart a run to load
-allowlist changes. No API keys are printed in dry-run output. Explicit backend
+No API keys are printed in dry-run output. Explicit backend
 secrets passed as environment values travel in the private seed ISO, removed
 on normal exit; a killed launcher can leave private temporary artifacts.
 
 Use --shell for a shell with the selected agent's state, or --check for
-a noninteractive guest smoke check. --check tests identity, state access,
-SQLite WAL access, proxy denial and direct TCP failures; it is not a replacement for the
-controlled host boundary suite.
+the guest smoke check described under Verification; it is not a replacement
+for the controlled host boundary suite.
 
-Before making QEMU your default, run the new installed-launcher acceptance:
+After changing launch wiring, run the installed-launcher acceptance:
 
 ```sh
 python3 prototypes/qemu/accept_launcher.py \
@@ -419,19 +353,7 @@ are retained under `~/.cache/llm-sandbox/qemu-acceptance` for manual review.
 Add `--long-batch-seconds 960` to test a batch command beyond the old fifteen-minute
 limit; this deliberately adds sixteen minutes to the run.
 
-### QEMU tests and unattended runs
-
-Runtime coverage lives with the supported code and runs independently of
-`prototypes/`:
-
-```sh
-python3 -m unittest discover -s qemu
-python3 -m unittest discover -s tests
-python3 -m unittest discover -s prototypes/qemu
-```
-
-The last command covers source-image preparation, experimental boundary fixtures,
-compatibility entry points and the acceptance harness.
+### Unattended runs
 
 An unlimited batch command can stay alive after readiness if an agent waits
 for input or a tool hangs. For unattended work, choose a finite deadline, for
