@@ -15,12 +15,21 @@ import subprocess
 import tempfile
 import time
 
-from sandbox import USER_DATA, qemu_command, check_helpers
 try:
-    from proxy_process import Processes
+    from .sandbox import USER_DATA, qemu_command, check_helpers
+    from .proxy_process import Processes
+    from .build_support import BuildMonitor, read_report
 except ImportError:
-    from qemu.proxy_process import Processes
-from build_support import BuildMonitor, read_report
+    from sandbox import USER_DATA, qemu_command, check_helpers
+    from proxy_process import Processes
+    from build_support import BuildMonitor, read_report
+
+# Files the guest recipe reads from the seed. guest_verify.py carries the
+# tool list, so the build and the candidate boot check agree on it.
+SEED_FILES = ('provision_agents.py', 'guest_verify.py', 'browser-smoke.mjs', 'fontconfig-symbols.conf')
+# Virtual size; qcow2 allocates only what the guest writes. cloud-init's
+# growpart and resizefs expand the root filesystem on the first boot.
+DISK_SIZE = '30G'
 
 
 def build_script():
@@ -77,8 +86,8 @@ def main():
             raise ValueError('Missing host tools: '+ '; '.join(missing)+'. Nothing created or started.')
         if not os.access('/dev/kvm', os.R_OK | os.W_OK):
             raise ValueError('KVM access required')
-        if shutil.disk_usage(parent).free < 12 * 1024**3:
-            raise ValueError('at least 12 GiB free space required')
+        if shutil.disk_usage(parent).free < 16 * 1024**3:
+            raise ValueError('at least 16 GiB free space required')
         if args.result_file and (args.result_file.exists() or args.result_file.is_symlink()):
             raise ValueError('result file already exists')
     except (ValueError, OSError) as exc:
@@ -101,6 +110,8 @@ def main():
         image = base/'building.qcow2'
         subprocess.run([image_tool, 'convert', '-f', 'qcow2', '-O', 'qcow2',
                         str(disk), str(image)], check=True, timeout=600)
+        subprocess.run([image_tool, 'resize', '-f', 'qcow2', str(image), DISK_SIZE],
+                       check=True, timeout=60, stdout=subprocess.DEVNULL)
         build_allow = base/'build-allowlist.txt'
         build_allow.write_text('example.com\n')
         proxy = Processes(base, allow_file=build_allow, mode='log')
@@ -110,10 +121,11 @@ def main():
                  'network-config': 'version: 2\nethernets: {}\n'}
         for name, value in files.items():
             (source/name).write_text(value)
-        shutil.copyfile(Path(__file__).with_name('provision_agents.py'), source/'provision_agents.py')
+        for name in SEED_FILES:
+            shutil.copyfile(Path(__file__).with_name(name), source/name)
         seed = base/'seed.iso'
         subprocess.run([maker, '-quiet', '-output', str(seed), '-volid', 'cidata',
-                        '-joliet', '-rock', *files, 'provision_agents.py'], cwd=source,
+                        '-joliet', '-rock', *files, *SEED_FILES], cwd=source,
                        check=True, timeout=60)
         fs = transport/'vhost.sock'
         log = (base/'virtiofsd.log').open('w')
@@ -128,7 +140,8 @@ def main():
             if daemon.poll() is not None or time.monotonic() > deadline:
                 raise RuntimeError('virtiofsd did not start')
             time.sleep(.1)
-        command = qemu_command(qemu, image, seed, fs, proxy.ports['build'])
+        # Playwright stages browser downloads in /tmp, a tmpfs sharing guest RAM.
+        command = qemu_command(qemu, image, seed, fs, proxy.ports['build'], memory_mib=4096)
         # Image provisioning runs on the machine console, with no CLI session.
         command[command.index(f'file,id=machine,path={seed.parent}/machine.log')] = f'file,id=machine,path={base}/console.log'
         command[command.index('stdio,id=console,signal=off')] = 'null,id=console'

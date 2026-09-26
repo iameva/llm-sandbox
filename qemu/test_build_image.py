@@ -1,11 +1,14 @@
 """Validate build seed and its separation from ordinary launches."""
-import subprocess
-import unittest
-
-from sandbox import qemu_command
-from build_image import build_script
-from provision_agents import AGENTS, claude_install_command, pi_install_command
 from pathlib import Path
+import subprocess
+import sys
+import unittest
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from qemu.sandbox import qemu_command
+from qemu.build_image import SEED_FILES, build_script
+from qemu.provision_agents import (AGENTS, PACKAGES, PLAYWRIGHT_VERSION,
+                                   claude_install_command, pi_install_command)
 
 
 class BuildTests(unittest.TestCase):
@@ -46,6 +49,20 @@ class BuildTests(unittest.TestCase):
         self.assertIn('@earendil-works/pi-coding-agent', command)
         self.assertIn('--ignore-scripts', command)
         self.assertIn('--https-proxy=http://10.0.2.100:3128', command)
+
+    def test_seed_carries_recipe_inputs(self):
+        # guest_verify.py supplies the tool list the recipe checks against.
+        for name in SEED_FILES:
+            self.assertTrue((Path(__file__).with_name(name)).is_file(), name)
+        self.assertIn('guest_verify.py', SEED_FILES)
+
+    def test_recipe_keeps_container_parity(self):
+        for package in ('zsh', 'golang', 'caddy', 'gtk3', 'nss', 'mesa-libgbm',
+                        'google-noto-sans-symbols-2-fonts', 'google-noto-color-emoji-fonts'):
+            self.assertIn(package, PACKAGES)
+        self.assertEqual(len(PACKAGES), len(set(PACKAGES)))
+        # Playwright looks for one browser build; a range would drift from it.
+        self.assertRegex(PLAYWRIGHT_VERSION, r'^\d+\.\d+\.\d+$')
 
     def test_command_uses_caller_selected_disk_without_implicit_snapshot(self):
         command = qemu_command('qemu', Path('/base.qcow2'), Path('/seed.iso'),

@@ -127,7 +127,7 @@ class ProfileTests(unittest.TestCase):
 class BackendRunnerTests(RunnerFixture):
     # Reuse the isolated runner fixture, without duplicating its inherited tests.
     def test_each_harness_keeps_its_mounts_when_backend_changes(self):
-        for harness in ['claude', 'codex', 'pi', 'omp', 'opencode', 'aider']:
+        for harness in ['claude', 'codex', 'pi', 'omp', 'opencode']:
             with self.subTest(harness=harness):
                 self.assertEqual(self.launch(harness).returncode, 0)
                 native = self.argv()
@@ -192,8 +192,6 @@ class BackendRunnerTests(RunnerFixture):
         self.assertEqual(self.launch('claude').returncode, 0)
         self.assertIn('opus', self.argv())
         self.assertFalse(any(arg.startswith('ANTHROPIC_DEFAULT_') for arg in self.argv()))
-        self.assertEqual(self.launch('aider').returncode, 0)
-        self.assertIn('deepseek/deepseek-v4-pro', self.argv())
 
     def test_reinstall_keeps_user_profiles(self):
         path = self.home / '.config/llm-sandbox/backends.json'
@@ -203,6 +201,20 @@ class BackendRunnerTests(RunnerFixture):
         self.assertEqual(path.read_text(), value)
         self.assertEqual(self.launch('pi').returncode, 0)
         self.assertIn('deepseek-v4-pro', self.argv())
+
+    def test_retired_aider_default_does_not_block_launches(self):
+        path = self.home / '.config/llm-sandbox/backends.json'
+        path.write_text('{"defaults":{"aider":"deepseek","pi":"deepseek"}}')
+        self.assertEqual(self.launch('pi').returncode, 0)
+        self.assertIn('deepseek-v4-pro', self.argv())
+        self.assertNotEqual(self.launch('aider').returncode, 0)
+
+    def test_reinstall_removes_aider_entry_point(self):
+        stale = self.home / '.local/bin/,aider-sandbox.sh'
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        stale.write_text('#!/bin/sh\n')
+        subprocess.run(['sh', 'install.sh'], cwd=REPO, env=self.env, check=True, capture_output=True)
+        self.assertFalse(stale.exists())
 
     def test_missing_secret_fails_before_creating_mounts(self):
         (self.home / '.config/deepseek.api').unlink()

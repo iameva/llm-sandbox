@@ -95,22 +95,31 @@ The first command only checks prerequisites and creates no files. The second:
 2. Runs the current installation recipe in a build VM, permitting public HTTPS
    through its dedicated proxy. No project, host credentials or shared agent
    state are exported. Only a temporary report directory is shared.
-3. Installs the current releases of Claude, Codex, Pi, OMP and OpenCode and
-   checks their versions. These versions are recorded, not pinned in advance.
-   Fedora dependencies come from the configured Fedora 44 repositories. The
-   current recipe does not perform a full OS upgrade; configure a newer
-   verified Fedora 44 cloud source when refreshing the underlying OS.
+3. Grows the copy to a 30G virtual disk, then installs the current releases
+   of Claude, Codex, Pi, OMP and OpenCode and the toolchain the old container
+   image carried: Rust stable with `rust-src`, Go, Node and npm, Playwright
+   with Firefox and Chromium in `/opt/ms-playwright`, the browser libraries
+   and symbol fonts, and the CLI tools listed in `qemu/guest_verify.py`.
+   Agent and tool versions are recorded, not pinned in advance; Playwright is
+   the exception, pinned in `qemu/provision_agents.py` because each release
+   expects one browser build. Fedora dependencies come from the configured
+   Fedora 44 repositories. The current recipe does not perform a full OS
+   upgrade; configure a newer verified Fedora 44 cloud source when refreshing
+   the underlying OS.
 4. Waits for shutdown, runs `qemu-img check`, hashes the image, writes the
    manifest and publishes `agents.qcow2` with mode `0400`.
 5. Boots the candidate in a disposable run with a fresh empty workspace, no
-   shared agent state and an enforcing proxy. All five version checks and the
-   runtime smoke checks must pass, with versions matching the manifest.
+   shared agent state and an enforcing proxy. All five version checks, every
+   tool check, a launch of both browsers and the runtime smoke checks must
+   pass, with agent versions matching the manifest. The browser screenshots
+   stay in the printed boot-check directory under `workspace/browser-smoke`;
+   look at them for boxes in place of symbol glyphs.
 6. Rechecks the digest, then atomically replaces the configured active path
    and saves the previous selection for rollback.
 
 A build, validation or boot failure leaves the previous selection in place.
 Interrupted builds and failed candidates retain diagnostic files for review.
-The builder requires at least 12 GiB free; it uses a full disk copy per build.
+The builder requires at least 16 GiB free; it uses a full disk copy per build.
 Only one image operation may run for a given config at a time. Ordinary
 launches continue during builds and activation.
 

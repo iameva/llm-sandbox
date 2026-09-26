@@ -2,6 +2,11 @@
 import json
 import time
 
+try:
+    from .guest_verify import TOOLS
+except ImportError:
+    from guest_verify import TOOLS
+
 EXPECTED_AGENTS = {'claude', 'codex', 'pi', 'omp', 'opencode'}
 
 
@@ -15,7 +20,11 @@ def read_report(path):
         versions = report.get('versions')
         if (not isinstance(versions, dict) or set(versions) != EXPECTED_AGENTS
                 or any(not isinstance(v, str) or not v.strip() for v in versions.values())):
-            raise RuntimeError('build report lacks all five tool versions')
+            raise RuntimeError('build report lacks all five agent versions')
+        tools = report.get('tools')
+        if (not isinstance(tools, dict) or set(tools) != set(TOOLS)
+                or any(not isinstance(v, str) or not v.strip() for v in tools.values())):
+            raise RuntimeError('build report lacks a version for every tool')
     return report
 
 

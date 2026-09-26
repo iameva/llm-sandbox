@@ -23,7 +23,10 @@ DEFAULTS = {
 }
 FIELDS = {"provider", "auth", "model", "fast_model", "key_env", "key_file",
           "base_url", "anthropic_base_url", "harnesses"}
-HARNESSES = {"claude", "codex", "pi", "omp", "opencode", "aider", "llm"}
+HARNESSES = {"claude", "codex", "pi", "omp", "opencode", "llm"}
+# Removed harnesses. install.sh keeps a user's backends.json, and the old
+# example file set an aider default, so its key must not block every launch.
+RETIRED_HARNESSES = {"aider"}
 
 
 def string(value, label):
@@ -52,7 +55,7 @@ def load_profile(path, harness, selected, model):
     defaults = config.get("defaults", {})
     if not isinstance(profiles, dict) or not isinstance(defaults, dict):
         raise ValueError("profiles and defaults must be objects")
-    if set(defaults) - HARNESSES:
+    if set(defaults) - HARNESSES - RETIRED_HARNESSES:
         raise ValueError("defaults contains an unknown harness")
     name = selected or defaults.get(harness, "")
     if not name:
@@ -65,7 +68,7 @@ def load_profile(path, harness, selected, model):
         raise ValueError(f"invalid fields in profile {name!r}")
     profile = {**DEFAULTS.get(name, {}), **custom}
     overrides = profile.pop("harnesses", {})
-    if not isinstance(overrides, dict) or set(overrides) - HARNESSES:
+    if not isinstance(overrides, dict) or set(overrides) - HARNESSES - RETIRED_HARNESSES:
         raise ValueError("harnesses must map supported harness names to overrides")
     override = overrides.get(harness, {})
     if not isinstance(override, dict) or set(override) - (FIELDS - {"harnesses"}):
@@ -127,7 +130,7 @@ def plan(harness, name, profile, dry_run=False):
         raise ValueError("Claude backends are restricted to the claude harness")
     if provider == "deepseek" and login:
         raise ValueError("DeepSeek requires auth=api_key")
-    if login and harness in {"claude", "aider"} and provider == "openai":
+    if login and harness == "claude" and provider == "openai":
         raise ValueError("ChatGPT login is not supported by this harness; use an API-key gateway profile for Claude Code")
     if provider == "openai" and harness == "claude" and not profile.get("anthropic_base_url"):
         raise ValueError("GPT in Claude Code needs anthropic_base_url pointing to an Anthropic-compatible gateway")
@@ -244,14 +247,6 @@ def plan(harness, name, profile, dry_run=False):
             secret("SANDBOX_PROVIDER_API_KEY", key)
         env("OPENCODE_CONFIG_CONTENT", json.dumps(config, separators=(",", ":")))
         arg("--model", config["model"])
-    elif harness == "aider":
-        prefix = "deepseek" if provider == "deepseek" else "openai"
-        secret("DEEPSEEK_API_KEY" if provider == "deepseek" else "OPENAI_API_KEY", key)
-        arg("--model", f"{prefix}/{model}")
-        if fast:
-            arg("--weak-model", f"{prefix}/{fast}")
-        if "base_url" in profile:
-            raise ValueError("custom base_url is not supported by the aider adapter")
     return records
 
 

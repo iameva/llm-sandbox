@@ -290,10 +290,6 @@ configure_agent() {
         )
         CMD=(codex --dangerously-bypass-approvals-and-sandbox)
         ;;
-    aider)
-        MOUNTS=("aider:${HOME_IN_SANDBOX}/.aider")
-        CMD=(aider)
-        ;;
     omp)
         MOUNTS=("omp:${HOME_IN_SANDBOX}/.omp")
         CMD=(omp)
@@ -619,7 +615,6 @@ fi
 # QEMU uses the same harness plan and live state directories, with a
 # private overlay and proxy per invocation. It never enters Podman's path.
 if [[ "$ISOLATION" == "qemu" ]]; then
-    [[ "$AGENT" != "aider" ]] || die "the QEMU image does not include aider"
     [[ "$CLAUDE_CONFIG_IN_DIR" == "1" ]] || die "QEMU requires SANDBOX_CLAUDE_CONFIG_DIR=1"
     qemu_runner="$script_dir/qemu/sandbox.py"
     [[ -f "$qemu_runner" ]] || qemu_runner="$ROOT/qemu/sandbox.py"
@@ -645,8 +640,6 @@ if [[ "$ISOLATION" == "qemu" ]]; then
     done
     for e in "${ENVS[@]}"; do qargv+=(--env "$e"); done
     for asset in "${BACKEND_ASSETS[@]}"; do qargv+=(--asset "$asset"); done
-    # The existing cloud image includes bash; new builds also include zsh.
-    if [[ "${CMD[0]}" == "zsh" ]]; then CMD[0]=bash; fi
     if [[ "${SANDBOX_CHECK:-}" == "1" || "${IS_QEMU_CHECK:-0}" == "1" ]]; then
         qargv+=(--verify)
         CMD=(true)
@@ -806,7 +799,7 @@ Container mode still works: unset SANDBOX_ISOLATION."
         # container escape is a VMM bug rather than a kernel LPE.
         # vm mode is not usable yet: krun runs the entrypoint as uid 0
         # while virtiofs stamps files uid 1000, and no --userns mapping
-        # reconciles them. See the note above and vm-migration-plan.md.
+        # reconciles them. See the note above and legacy/vm-migration-plan.md.
         # Loud on purpose — silently handing back a broken sandbox is how
         # the 2026-08-04 "verified" claim happened.
         if [[ "${SANDBOX_VM_ACK:-}" != "1" && "${SANDBOX_CHECK:-}" != "1" && "${CMD[0]}" != "zsh" ]]; then
@@ -884,7 +877,7 @@ fi
 if [[ -n "$pasta_opts" && "$ISOLATION" == "gvisor" ]]; then
     echo "sandbox-run: WARNING — a loopback SANDBOX_PROXY cannot be reached under gvisor." >&2
     echo "sandbox-run: gVisor has its own network stack, so pasta's port forward is invisible to it." >&2
-    echo "sandbox-run: Bind the proxy to a host address the sandbox can route to. See vm-migration-plan.md." >&2
+    echo "sandbox-run: Bind the proxy to a host address the sandbox can route to. See legacy/vm-migration-plan.md." >&2
 fi
 
 if [[ -n "$pasta_opts" ]]; then

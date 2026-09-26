@@ -78,8 +78,11 @@ def session():
         'HOME': user.pw_dir,
         'USER': user.pw_name,
         'LOGNAME': user.pw_name,
-        'PATH': f'{user.pw_dir}/.local/bin:{user.pw_dir}/.opencode/bin:'
+        'PATH': f'{user.pw_dir}/.cargo/bin:{user.pw_dir}/.local/bin:{user.pw_dir}/.opencode/bin:'
                 f'{user.pw_dir}/.bun/bin:/usr/local/bin:/usr/bin:/bin',
+        # Browsers baked into the image, shared and read-only. A project on
+        # another Playwright version points this under /workspace instead.
+        'PLAYWRIGHT_BROWSERS_PATH': '/opt/ms-playwright',
         'CODEX_HOME': f'{user.pw_dir}/.config/codex',
         'CODEX_SQLITE_HOME': str(sqlite_home),
         'TERM': 'xterm-256color',
@@ -99,7 +102,7 @@ def session():
           flush=True)
     if config.get('verify'):
         from guest_verify import verify
-        return verify(mounts, sqlite_home, environment, config.get('verify_agents', False))
+        return verify(mounts, sqlite_home, environment, config.get('verify_image', False))
     from guest_verify import omp_sqlite_checks
     if not all(omp_sqlite_checks(mounts).values()):
         raise RuntimeError('OMP shared state does not support SQLite WAL mapping; '
@@ -107,6 +110,9 @@ def session():
     command = config.get('command')
     if not command:
         command = ['bash', '--noprofile', '--norc', '-i'] if config['agent'] == 'shell' else [config['agent']]
+    if command[0] == 'zsh' and not shutil.which('zsh', path=environment['PATH']):
+        # Images built before zsh was added; keeps rollback usable.
+        command = ['bash', *command[1:]]
     child = subprocess.Popen(command, env=environment)
     while child.poll() is None:
         time.sleep(1)

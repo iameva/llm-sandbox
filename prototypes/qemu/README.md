@@ -389,15 +389,15 @@ allowed HTTPS, explicit proxy denial, and normal shutdown all worked.
 Prepare a separate image with Claude, Codex, Pi, OMP, and OpenCode:
 
 ```sh
-python3 prototypes/qemu/build_image.py --check \
+python3 qemu/build_image.py --check \
   --disk /var/home/duve/qemu-guest-nf9508pc/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2
 
-python3 prototypes/qemu/build_image.py --allow-downloads \
+python3 qemu/build_image.py --allow-downloads \
   --disk /var/home/duve/qemu-guest-nf9508pc/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2
 ```
 
-No sudo. Requires qemu-img in addition to the existing runtime, 12 GiB free
-space, and 2 GiB guest RAM. The script creates a private qemu-agents directory
+No sudo. Requires qemu-img in addition to the existing runtime, 16 GiB free
+space, and 4 GiB guest RAM. The script creates a private qemu-agents directory
 under your home (or --parent). It converts the verified disk into a new,
 independent writable copy; the original is never modified. No project or
 credentials are exported. Only an empty report directory is shared.

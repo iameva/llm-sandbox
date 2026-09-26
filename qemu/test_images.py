@@ -155,7 +155,7 @@ class ImageTests(unittest.TestCase):
         def fake_boot(command, timeout):
             directory = Path(command[command.index('--cache-dir')+1])/'run-test'
             directory.mkdir(parents=True)
-            self.assertIn('--verify-agents', command)
+            self.assertIn('--verify-image', command)
             mounts = [command[index+1].split(':', 1)
                       for index, value in enumerate(command) if value == '--mount']
             self.assertEqual({target for source, target in mounts},
@@ -177,6 +177,14 @@ class ImageTests(unittest.TestCase):
                     images.probe(self.first, self.root)
             self.probe_report = {'checks': dict.fromkeys(images.REQUIRED_CHECKS, True), 'versions': self.versions}
             self.assertEqual(images.probe(self.first, self.root), self.versions)
+            # A manifest listing tools makes their checks mandatory; a guest
+            # that skipped them (no tool record) cannot pass.
+            tools = {'cargo': '1', 'playwright': '1'}
+            with self.assertRaises(RuntimeError):
+                images.probe(self.first, self.root, tools)
+            self.probe_report['checks'].update(dict.fromkeys(
+                [*images.TOOL_CHECKS, 'tool:cargo', 'tool:playwright'], True))
+            self.assertEqual(images.probe(self.first, self.root, tools), self.versions)
 
     def test_malformed_configuration_and_manifest_fail_cleanly(self):
         self.second.with_name('manifest.json').write_text('[]')

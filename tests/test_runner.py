@@ -52,7 +52,7 @@ class RunnerTests(RunnerFixture):
             "codex": ["codex", "--dangerously-bypass-approvals-and-sandbox"],
             "deepseek-claude": ["claude", "--dangerously-skip-permissions", "--model", "deepseek-v4-pro"],
             "opencode": ["opencode"], "pi": ["pi"], "omp": ["omp"],
-            "aider": ["aider"], "llm": ["zsh"],
+            "llm": ["zsh"],
         }
         for agent, command in commands.items():
             with self.subTest(agent=agent):

@@ -5,8 +5,14 @@ import json
 import os
 from pathlib import Path
 import pwd
+import shutil
 import subprocess
 import traceback
+
+try:
+    from .guest_verify import SYMBOL_FONT_RULE, TOOLS_RECORD
+except ImportError:
+    from guest_verify import SYMBOL_FONT_RULE, TOOLS_RECORD
 
 AGENTS = {
     'codex': ('https://chatgpt.com/codex/install.sh', ['sh']),
@@ -15,6 +21,39 @@ AGENTS = {
     'omp': ('https://omp.sh/install', ['sh']),
     'opencode': ('https://opencode.ai/install', ['bash']),
 }
+
+
+# The retired Containerfile's package set. The browser libraries are the
+# real ldd closure of Playwright's Chromium (alsa-lib..pixman) and Firefox
+# (gtk3..libXcursor) builds; `playwright install --with-deps` only knows
+# Debian names. Without the fonts, screenshots draw symbols as boxes.
+PACKAGES = [
+    'git', 'ripgrep', 'nodejs', 'npm', 'curl', 'tar', 'gzip', 'unzip', 'xz', 'findutils',
+    'which', 'gcc', 'make', 'python3-pip', 'strace', 'zsh', 'neovim', 'vim-enhanced', 'tree',
+    'task', 'golang', 'bubblewrap', 'caddy', 'sqlite', 'jq', 'iproute', 'openssl',
+    'perl-Digest-SHA', 'ca-certificates', 'coreutils',
+    'alsa-lib', 'at-spi2-atk', 'at-spi2-core', 'atk', 'avahi-libs', 'cairo', 'cups-libs',
+    'dbus-libs', 'expat', 'fontconfig', 'freetype', 'fribidi', 'glib2', 'graphite2', 'harfbuzz',
+    'libX11', 'libXcomposite', 'libXdamage', 'libXext', 'libXfixes', 'libXi', 'libXrandr',
+    'libXrender', 'libdatrie', 'libdrm', 'libpng', 'libthai', 'libxcb', 'libxkbcommon',
+    'mesa-libgbm', 'nspr', 'nss', 'nss-util', 'pango', 'pixman',
+    'gtk3', 'cairo-gobject', 'gdk-pixbuf2', 'libXcursor',
+    'dejavu-sans-fonts', 'dejavu-sans-mono-fonts', 'dejavu-serif-fonts',
+    'liberation-sans-fonts', 'liberation-serif-fonts', 'liberation-mono-fonts',
+    'google-noto-sans-symbols-fonts', 'google-noto-sans-symbols-2-fonts',
+    'google-noto-color-emoji-fonts',
+]
+
+# Exact on purpose: each Playwright release looks for one browser build
+# number and fails with "executable doesn't exist" for any other. Move the
+# version and a rebuild together.
+PLAYWRIGHT_VERSION = '1.63.0'
+PLAYWRIGHT_BROWSERS = ['firefox', 'chromium']
+PLAYWRIGHT_BROWSERS_PATH = '/opt/ms-playwright'
+
+# The build disk is resized before boot; cloud-init grows the root
+# filesystem. Fail early rather than halfway through the toolchain.
+MINIMUM_ROOT_BYTES = 25 * 1024**3
 
 
 def claude_install_command(home, proxy):
@@ -81,6 +120,36 @@ def install_omp(as_user, home):
     print('OMP download complete; starting separate version check', flush=True)
 
 
+def install_playwright(env, proxy):
+    stage(f'Installing Playwright {PLAYWRIGHT_VERSION}')
+    subprocess.run(['npm', 'install', '--global', '--registry=https://registry.npmjs.org',
+                    '--proxy='+proxy, '--https-proxy='+proxy, '--no-audit', '--no-fund',
+                    f'@playwright/test@{PLAYWRIGHT_VERSION}'],
+                   env=env, stdin=subprocess.DEVNULL, check=True, timeout=600)
+    stage('Downloading Playwright browsers')
+    # Ends with an ldd check of each browser, so a missing library fails here.
+    prefix = subprocess.run(['npm', 'prefix', '--global'], env=env, capture_output=True,
+                            text=True, check=True, timeout=60).stdout.strip()
+    subprocess.run([f'{prefix}/bin/playwright', 'install', *PLAYWRIGHT_BROWSERS],
+                   env={**env, 'PLAYWRIGHT_BROWSERS_PATH': PLAYWRIGHT_BROWSERS_PATH},
+                   stdin=subprocess.DEVNULL, check=True, timeout=1800)
+    subprocess.run(['chmod', '-R', 'a+rX', PLAYWRIGHT_BROWSERS_PATH], check=True, timeout=120)
+
+
+def install_rust(as_user, home):
+    stage('Downloading rustup')
+    script = f'{home}/install-rust.sh'
+    as_user(['curl', '-q', '-fsSL', '--proto', '=https', '--proto-redir', '=https',
+             '--connect-timeout', '30', '--max-time', '180', '--retry', '2',
+             'https://sh.rustup.rs', '-o', script], timeout=400)
+    stage('Installing Rust stable')
+    # The guest session puts ~/.cargo/bin on PATH; no shell profile edits.
+    as_user(['sh', script, '-y', '--no-modify-path', '--default-toolchain', 'stable'],
+            stdin=subprocess.DEVNULL, timeout=1800)
+    Path(script).unlink()
+    as_user(['rustup', 'component', 'add', 'rust-src'], stdin=subprocess.DEVNULL, timeout=600)
+
+
 def stage(name):
     print(name, flush=True)
     payload = json.dumps({'stage': name})
@@ -109,15 +178,22 @@ def main():
         'baseurl=https://dl.fedoraproject.org/pub/fedora/linux/updates/44/Everything/x86_64/\n'
         'enabled=1\ngpgcheck=1\n'
         'gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-44-x86_64\n')
+    root = os.statvfs('/')
+    if root.f_blocks * root.f_frsize < MINIMUM_ROOT_BYTES:
+        raise RuntimeError('root filesystem did not grow to the resized disk; inspect console.log for growpart')
     stage('Installing Fedora dependencies')
     subprocess.run(['dnf', '-y', '--setopt=reposdir='+str(repos),
-                    '--setopt=proxy='+proxy, 'install',
-                    'git', 'ripgrep', 'nodejs', 'npm', 'curl', 'tar', 'gzip',
-                    'unzip', 'xz', 'findutils', 'which', 'gcc', 'make', 'python3-pip', 'strace'],
-                   env=env, check=True, timeout=1800)
+                    '--setopt=proxy='+proxy, 'install', *PACKAGES],
+                   env=env, check=True, timeout=3600)
+    # Firefox's glyph fallback never reaches the Noto symbol fonts without this.
+    shutil.copyfile('/mnt/seed/fontconfig-symbols.conf', SYMBOL_FONT_RULE)
+    shutil.copyfile('/mnt/seed/browser-smoke.mjs', '/usr/local/bin/browser-smoke.mjs')
+    os.chmod('/usr/local/bin/browser-smoke.mjs', 0o755)
+    install_playwright(env, proxy)
     user_env = {**env, 'HOME': user.pw_dir, 'USER': user.pw_name,
                 'LOGNAME': user.pw_name, 'CODEX_NON_INTERACTIVE': '1',
-                'PATH': f'{user.pw_dir}/.local/bin:{user.pw_dir}/.opencode/bin:'
+                'PLAYWRIGHT_BROWSERS_PATH': PLAYWRIGHT_BROWSERS_PATH,
+                'PATH': f'{user.pw_dir}/.cargo/bin:{user.pw_dir}/.local/bin:{user.pw_dir}/.opencode/bin:'
                         f'{user.pw_dir}/.bun/bin:/usr/local/bin:/usr/bin:/bin'}
     # Keep build-time credentials/config absent, including installer state
     # inherited from neither the host nor the launcher.
@@ -169,13 +245,35 @@ def main():
         print(f'{agent}: {versions[agent]}', flush=True)
     stage('All five agents installed')
     Path('/etc/sandbox-agents.json').write_text(json.dumps(versions, indent=2))
-    return versions
+    install_rust(as_user, user.pw_dir)
+    stage('Checking tool versions')
+    checks, tools = tool_checks(as_user)
+    failed = sorted(name for name, passed in checks.items() if not passed)
+    if failed:
+        raise RuntimeError('tools missing after installation: '+', '.join(failed))
+    for name, version in tools.items():
+        print(f'{name}: {version}', flush=True)
+    TOOLS_RECORD.write_text(json.dumps(tools, indent=2))
+    return versions, tools
+
+
+def tool_checks(as_user):
+    """Run the boot check's own tool probes as the session user."""
+    result = as_user(['python3', '-c', 'import json, os, sys; sys.path.insert(0, "/mnt/seed"); '
+                      'from guest_verify import tool_versions; '
+                      'print(json.dumps(tool_versions(dict(os.environ))))'],
+                     stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=600)
+    # Failed probes print diagnostics first; the report is the last line.
+    *diagnostics, report = result.stdout.splitlines()
+    print('\n'.join(diagnostics), flush=True)
+    return json.loads(report)
 
 
 if __name__ == '__main__':
     report = {}
     try:
-        report = {'ok': True, 'versions': main()}
+        versions, tools = main()
+        report = {'ok': True, 'versions': versions, 'tools': tools}
     except Exception as exc:
         traceback.print_exc()
         if isinstance(exc, subprocess.CalledProcessError):

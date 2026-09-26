@@ -168,7 +168,9 @@ def main():
     env = {k: v for k, v in os.environ.items() if not k.startswith('SANDBOX_')}
     env.update(HOME=str(home), SANDBOX_ISOLATION='qemu', SANDBOX_QEMU_DISK=str(disk),
                SANDBOX_BATCH='1', SANDBOX_QEMU_CACHE_DIR=str(base/'runs'),
-               SANDBOX_QEMU_KEEP_ARTIFACTS='1')
+               SANDBOX_QEMU_KEEP_ARTIFACTS='1',
+               # Two VMs at once; stay at the old 2 GiB each, not the daily default.
+               SANDBOX_QEMU_MEMORY_MIB='2048', SANDBOX_QEMU_CPUS='2')
     children, logs = [], []
     terminal = None
     drain = None

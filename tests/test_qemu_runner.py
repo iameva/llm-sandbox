@@ -27,7 +27,7 @@ class QemuRunnerTests(RunnerFixture):
         self.assertFalse(self.capture.exists())
 
     def test_shell_and_check_keep_agent_state(self):
-        for flag, expected in [('--shell', 'bash'), ('--check', 'true')]:
+        for flag, expected in [('--shell', 'zsh'), ('--check', 'true')]:
             result = self.qemu('claude', flag)
             self.assertEqual(result.returncode, 0, result.stderr)
             argv = shlex.split(result.stdout)

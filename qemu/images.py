@@ -26,6 +26,9 @@ REQUIRED_CHECKS = {'uid_1000', 'codex_sqlite_wal', 'omp_sqlite_wal', 'one_defaul
                    'writable:/home/fedora/.pi',
                    'writable:/home/fedora/.omp',
                    *(name+'_version' for name in AGENTS)}
+# Required in addition when the manifest records tools. Images published
+# before the toolchain was added record none and stay usable for rollback.
+TOOL_CHECKS = {'rust_src', 'symbol_fonts', 'browser_smoke'}
 DEFAULT_CONFIG = Path.home()/'.config/llm-sandbox/qemu.json'
 
 
@@ -112,13 +115,17 @@ def verify_published(image):
     if (manifest.get('ok') is not True or not isinstance(versions, dict) or set(versions) != AGENTS
             or any(not isinstance(value, str) or not value.strip() for value in versions.values())):
         raise ValueError('manifest must record a successful build and all five agent versions')
+    tools = manifest.get('tools')
+    if tools is not None and (not isinstance(tools, dict) or not tools
+                              or any(not isinstance(value, str) or not value.strip() for value in tools.values())):
+        raise ValueError('manifest tools must map each tool to its recorded version')
     if manifest.get('sha256') != digest(image):
         raise ValueError('image does not match its manifest SHA-256 digest')
     image_tool('check', '-f', 'qcow2', image)
     return image, manifest
 
 
-def probe(image, store):
+def probe(image, store, tools=None):
     """Boot a disposable candidate with empty state and no project or credentials."""
     directory = Path(tempfile.mkdtemp(prefix='probe-', dir=store))
     workspace = directory/'workspace'
@@ -136,7 +143,7 @@ def probe(image, store):
     run_owned([sys.executable, str(Path(__file__).with_name('sandbox.py')),
                '--disk', str(image), '--workspace', str(workspace), '--allow-file', str(allow),
                *state_arguments,
-               '--cache-dir', str(directory/'runs'), '--keep-artifacts', '--verify-agents'], timeout=1800)
+               '--cache-dir', str(directory/'runs'), '--keep-artifacts', '--verify-image'], timeout=1800)
     reports = list((directory/'runs').glob('run-*/verify.json'))
     if len(reports) != 1:
         raise RuntimeError('candidate boot check did not produce exactly one report')
@@ -144,17 +151,20 @@ def probe(image, store):
     if not isinstance(report, dict):
         raise RuntimeError('candidate boot report must be an object')
     checks, versions = report.get('checks', {}), report.get('versions', {})
-    if (not isinstance(checks, dict) or not REQUIRED_CHECKS.issubset(checks) or not isinstance(versions, dict)
+    required = REQUIRED_CHECKS | (TOOL_CHECKS | {'tool:'+name for name in tools} if tools else set())
+    if (not isinstance(checks, dict) or not required.issubset(checks) or not isinstance(versions, dict)
             or not all(value is True for value in checks.values()) or set(versions) != AGENTS):
         raise RuntimeError('candidate boot checks did not all pass')
     if any(not isinstance(value, str) or not value.strip() for value in versions.values()):
         raise RuntimeError('candidate did not report all five agent versions')
+    if tools:
+        print(f'Browser screenshots to inspect: {workspace}/browser-smoke', flush=True)
     return versions
 
 
 def select_image(config_path, config, candidate, store, tested_versions=None):
     image, manifest = verify_published(candidate)
-    versions = probe(image, store) if tested_versions is None else tested_versions
+    versions = probe(image, store, manifest.get('tools')) if tested_versions is None else tested_versions
     if versions != manifest['versions']:
         raise RuntimeError('booted agent versions differ from the published manifest')
     # Recheck after boot; the candidate was opened only through an overlay.
@@ -170,13 +180,10 @@ def select_image(config_path, config, candidate, store, tested_versions=None):
 
 
 def builder_path():
-    installed = Path(__file__).with_name('build_image.py')
-    if installed.is_file():
-        return installed
-    source = Path(__file__).resolve().parents[1]/'prototypes/qemu/build_image.py'
-    if not source.is_file():
+    builder = Path(__file__).with_name('build_image.py')
+    if not builder.is_file():
         raise ValueError('image builder is missing; rerun install.sh from the repository')
-    return source
+    return builder
 
 
 def build_candidate(config, store):

@@ -11,9 +11,12 @@ BIN="${HOME}/.local/bin"
 CONF="${HOME}/.config/llm-sandbox"
 mkdir -p "$BIN" "$CONF"
 
-for agent in claude codex llm opencode aider pi omp; do
+for agent in claude codex llm opencode pi omp; do
     install -m 0755 sandbox-run.sh "$BIN/,${agent}-sandbox.sh"
 done
+
+# Aider was removed; drop its entry point from an earlier install.
+rm -f "$BIN/,aider-sandbox.sh"
 
 install -m 0755 sandbox-run.sh "$BIN/,deepseek-claude-code.sh"
 install -m 0755 sandbox-run.sh "$BIN/,sandbox-run.sh"
@@ -42,11 +45,9 @@ install -m 0644 egress-allowlist.txt "$ALLOW"
 
 # Keep the QEMU runtime beside its dependencies; no VMs or images are built.
 mkdir -p "$CONF/qemu"
-for file in sandbox.py sandbox_guest.py network_relay.py proxy_process.py guest_verify.py runtime_support.py images.py; do
+for file in sandbox.py sandbox_guest.py network_relay.py proxy_process.py guest_verify.py runtime_support.py images.py \
+        build_image.py build_support.py provision_agents.py browser-smoke.mjs fontconfig-symbols.conf; do
     install -m 0644 "qemu/$file" "$CONF/qemu/$file"
-done
-for file in build_image.py build_support.py provision_agents.py; do
-    install -m 0644 "prototypes/qemu/$file" "$CONF/qemu/$file"
 done
 install -m 0644 egress-proxy.py "$CONF/qemu/egress-proxy.py"
 cat > "$BIN/,sandbox-image" <<'SH'

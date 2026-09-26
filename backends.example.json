@@ -4,8 +4,7 @@
     "codex": "chatgpt",
     "pi": "chatgpt",
     "omp": "chatgpt",
-    "opencode": "chatgpt",
-    "aider": "deepseek"
+    "opencode": "chatgpt"
   },
   "profiles": {
     "claude": {

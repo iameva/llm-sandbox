@@ -1,5 +1,9 @@
+from pathlib import Path
+import sys
 import unittest
-from provision_agents import omp_asset
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from qemu.provision_agents import omp_asset
 
 
 class OmpAssetTests(unittest.TestCase):

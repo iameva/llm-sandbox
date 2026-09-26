@@ -1,9 +1,12 @@
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from build_support import BuildMonitor, EXPECTED_AGENTS, read_report
+from qemu.build_support import BuildMonitor, EXPECTED_AGENTS, read_report
+from qemu.guest_verify import TOOLS
 
 
 class MonitorTests(unittest.TestCase):
@@ -12,6 +15,8 @@ class MonitorTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.base = Path(self.directory.name)
         self.monitor = BuildMonitor(self.base, self.base, now=0)
+        self.success = {'ok': True, 'versions': {name: '1' for name in EXPECTED_AGENTS},
+                        'tools': {name: '1' for name in TOOLS}}
 
     def write_report(self, value):
         (self.base/'build-result.json').write_text(json.dumps(value))
@@ -27,11 +32,19 @@ class MonitorTests(unittest.TestCase):
 
     def test_success_requires_every_version(self):
         self.write_report({'ok': True, 'versions': {'codex': '1'}})
-        with self.assertRaisesRegex(RuntimeError, 'five tool versions'):
+        with self.assertRaisesRegex(RuntimeError, 'five agent versions'):
             read_report(self.base/'build-result.json')
 
+    def test_success_requires_every_tool(self):
+        for tools in (None, {}, {**self.success['tools'], 'cargo': ''},
+                      {name: '1' for name in list(TOOLS)[1:]}):
+            with self.subTest(tools=tools):
+                self.write_report({**self.success, 'tools': tools})
+                with self.assertRaisesRegex(RuntimeError, 'every tool'):
+                    read_report(self.base/'build-result.json')
+
     def test_successful_install_cannot_wait_forever_for_shutdown(self):
-        self.write_report({'ok': True, 'versions': {name: '1' for name in EXPECTED_AGENTS}})
+        self.write_report(self.success)
         self.monitor.poll(now=1)
         with self.assertRaisesRegex(TimeoutError, 'shut down'):
             self.monitor.poll(now=92)
@@ -42,7 +55,7 @@ class MonitorTests(unittest.TestCase):
             self.monitor.poll(now=100)
 
     def test_success_report_allows_shutdown_warning(self):
-        self.write_report({'ok': True, 'versions': {name: '1' for name in EXPECTED_AGENTS}})
+        self.write_report(self.success)
         (self.base/'console.log').write_text('Failed to run module scripts_user')
         self.assertTrue(self.monitor.poll(now=100)['ok'])
 

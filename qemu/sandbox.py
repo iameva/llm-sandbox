@@ -197,10 +197,13 @@ def main():
     parser.add_argument('--env', action='append', default=[], help='guest NAME=value, or inherited NAME')
     parser.add_argument('--batch', action='store_true', help='noninteractive command; console goes to the run log')
     parser.add_argument('--verify', action='store_true', help='check this launch configuration inside the guest')
-    parser.add_argument('--verify-agents', action='store_true', help='also check all five installed agent versions')
+    parser.add_argument('--verify-image', action='store_true',
+                        help='also check installed agents, tools and browsers (writes screenshots to the workspace)')
     parser.add_argument('--command', nargs=argparse.REMAINDER, help='exact guest command and arguments')
-    parser.add_argument('--memory-mib', type=bounded_integer(512, 1048576), default=2048)
-    parser.add_argument('--cpus', type=bounded_integer(1, 1024), default=2)
+    # Sized for cargo builds and two browsers; the guest's /tmp is a tmpfs
+    # that shares this memory.
+    parser.add_argument('--memory-mib', type=bounded_integer(512, 1048576), default=8192)
+    parser.add_argument('--cpus', type=bounded_integer(1, 1024), default=4)
     parser.add_argument('--boot-timeout', type=bounded_integer(1, 604800), default=600)
     parser.add_argument('--batch-timeout', type=bounded_integer(0, 604800), default=0,
                         help='seconds after guest readiness; 0 means no command deadline')
@@ -210,13 +213,13 @@ def main():
                         default=Path(os.environ.get('XDG_CACHE_HOME', str(Path.home()/'.cache')))/'llm-sandbox/qemu')
     parser.add_argument('--keep-artifacts', action='store_true', help='retain bounded diagnostics, never the disposable disk')
     args = parser.parse_args()
-    args.verify = args.verify or args.verify_agents
+    args.verify = args.verify or args.verify_image
     if os.geteuid() == 0:
         parser.error('run as your normal user, without sudo')
     try:
         cache = disk_cache(args.cache_dir)
         settings = launch_settings(args.mount, args.asset, args.env, args.command, args.verify)
-        settings['verify_agents'] = args.verify_agents
+        settings['verify_image'] = args.verify_image
         disk = args.disk.resolve(strict=True)
         workspace = args.workspace.resolve(strict=True)
         allow = args.allow_file.resolve(strict=True)

@@ -94,7 +94,7 @@ RUN microdnf update -y && \
     && microdnf clean all
 
 # Reaches the symbol fonts that Firefox's own glyph fallback misses.
-COPY fontconfig-symbols.conf /etc/fonts/conf.d/99-symbol-fallback.conf
+COPY qemu/fontconfig-symbols.conf /etc/fonts/conf.d/99-symbol-fallback.conf
 
 # Playwright, with its browsers baked in.
 #
@@ -124,7 +124,7 @@ RUN npm install -g "@playwright/test@${PLAYWRIGHT_VERSION}" && \
     chmod -R a+rX /opt/ms-playwright
 
 # Proves the browsers run here, rather than assuming they do.
-COPY --chmod=0755 browser-smoke.mjs /usr/local/bin/browser-smoke.mjs
+COPY --chmod=0755 qemu/browser-smoke.mjs /usr/local/bin/browser-smoke.mjs
 
 RUN microdnf install -y shasum
 
@@ -190,11 +190,6 @@ RUN curl -fsSL https://claude.ai/install.sh -o /tmp/install-claude.sh && \
     bash /tmp/install-claude.sh && \
     rm /tmp/install-claude.sh
 
-# Install Aider
-RUN curl -fsSL https://aider.chat/install.sh -o /tmp/install-aider.sh && \
-    sh /tmp/install-aider.sh && \
-    rm /tmp/install-aider.sh
-
 # Install pi
 RUN curl -fsSL https://pi.dev/install.sh -o /tmp/install-pi.sh && \
     sh /tmp/install-pi.sh && \
@@ -212,7 +207,7 @@ RUN curl -fsSL https://opencode.ai/install -o /tmp/install-opencode.sh && \
 ENV PATH="/home/appuser/.opencode/bin:${PATH}"
 
 # Catch missing executables during a build, before installing host launchers.
-RUN codex --version && claude --version && aider --version && \
+RUN codex --version && claude --version && \
     pi --version && omp --version && opencode --version
 
 CMD ["zsh"]

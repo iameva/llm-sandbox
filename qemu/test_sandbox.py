@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from qemu.sandbox import USER_DATA, qemu_command, launch_settings
 from qemu.proxy_process import Processes
-from qemu.guest_verify import sqlite_wal_works, agent_versions, omp_sqlite_checks
+from qemu.guest_verify import sqlite_wal_works, agent_versions, omp_sqlite_checks, tool_versions, TOOLS
 
 
 class SandboxTests(unittest.TestCase):
@@ -39,6 +39,27 @@ class SandboxTests(unittest.TestCase):
             self.assertIs(call.kwargs['env'], environment)
             self.assertEqual(call.kwargs['timeout'], 60)
             self.assertEqual(call.kwargs['stdin'], subprocess.DEVNULL)
+
+    def test_tool_probes_record_first_line_and_fail_missing_tools(self):
+        environment = {'PATH': '/guest/bin'}
+        def fake_run(command, **kwargs):
+            if command[0] == 'cargo':
+                raise FileNotFoundError('cargo')
+            if command[0] == 'rustup' and command[1] == 'component':
+                return subprocess.CompletedProcess(command, 0, 'rust-src\nrustc-x86_64\n', '')
+            if command[0] == 'fc-list':
+                return subprocess.CompletedProcess(command, 0, 'DejaVu Sans,DejaVu Sans Condensed\n', '')
+            # Some tools print their version only on stderr.
+            return subprocess.CompletedProcess(command, 0, '', f'\n{command[0]} 1.0\nmore\n')
+        with patch('qemu.guest_verify.subprocess.run', side_effect=fake_run):
+            checks, versions = tool_versions(environment)
+        self.assertFalse(checks['tool:cargo'])
+        self.assertNotIn('cargo', versions)
+        self.assertEqual(versions['zsh'], 'zsh 1.0')
+        self.assertEqual(set(versions), set(TOOLS) - {'cargo'})
+        self.assertTrue(checks['rust_src'])
+        # Missing Noto symbol fonts, and no fontconfig rule outside a guest.
+        self.assertFalse(checks['symbol_fonts'])
 
     def test_sqlite_probe_supports_wal_and_preserves_existing_files(self):
         with tempfile.TemporaryDirectory() as directory:

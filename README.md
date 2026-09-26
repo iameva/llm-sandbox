@@ -23,7 +23,6 @@ Change into the project you want to work on, then run an installed entry point:
 ,claude-sandbox.sh
 ,codex-sandbox.sh
 ,opencode-sandbox.sh
-,aider-sandbox.sh
 ,pi-sandbox.sh
 ,omp-sandbox.sh
 ```
@@ -99,8 +98,7 @@ Codex, Pi, OMP, and OpenCode default to ChatGPT login. Claude Code defaults to C
     "codex": "chatgpt",
     "pi": "chatgpt",
     "omp": "chatgpt",
-    "opencode": "chatgpt",
-    "aider": "deepseek"
+    "opencode": "chatgpt"
   },
   "profiles": {
     "claude": {
@@ -197,7 +195,7 @@ Only events recorded after a successful upstream connection become active entrie
 | `gvisor` | Requires runsc; disables SELinux labeling for runtime compatibility. Test on the host. |
 | `vm` | Experimental and known to have ownership and mount problems with krun. Not a supported daily-use mode. |
 
-The runner's comments describe additional environment settings, including runtime paths, temporary storage, and SELinux mount labels. `vm-migration-plan.md` contains historical experiments, not current guarantees.
+The runner's comments describe additional environment settings, including runtime paths, temporary storage, and SELinux mount labels. `legacy/` holds the container-era plans and host probes (`vm-migration-plan.md`, `network-restriction-plan.md`, `host_assumptions.py`, `host_uds_boundary.py`); they record history, not current guarantees.
 
 Run local regression tests from this repository; these need no Podman, credentials, or public network:
 
@@ -283,7 +281,18 @@ QEMU, qemu-img, virtiofsd, GNU stat (coreutils), KVM access and an ISO maker
 must be installed already.
 The image manager installs and runs the separate builder; launchers
 never download or build an image implicitly. Rebuild to add tools to the
-shared base image. Aider is not in the five-agent image and is rejected.
+shared base image.
+
+The image carries the old container's toolchain: Rust stable (`~/.cargo/bin`
+on PATH, with `rust-src`), Go, Node and npm, zsh, Neovim, Vim, and the other
+tools listed in `qemu/guest_verify.py`. Playwright's Firefox and Chromium live
+read-only in `/opt/ms-playwright` (`PLAYWRIGHT_BROWSERS_PATH`); a project
+pinned to another Playwright version should point that variable under
+/workspace. Run `,llm-sandbox.sh --shell -c 'browser-smoke.mjs /workspace'`
+and inspect the screenshots for missing glyphs. Packages installed during a
+session disappear with its overlay; rebuild to keep them. Images published
+before the toolchain was added still boot and pass activation, so rollback
+to them works; `zsh` falls back to bash there.
 
 The QEMU builder installs Pi with npm under `~/.local`, outside its shared
 `~/.pi` state directory. OMP is installed directly at `~/.local/bin/omp`,
@@ -345,16 +354,17 @@ filesystem wiring changes.
 
 ### QEMU runtime controls
 
-Supported runtime code lives in `qemu/`; `prototypes/qemu/` contains image
-preparation and acceptance tools, plus compatibility entry points.
+Supported runtime and image-build code lives in `qemu/`; `prototypes/qemu/`
+contains source-image preparation and acceptance tools, plus compatibility
+entry points.
 Reinstall with `sh install.sh` after runtime changes. No image rebuild is needed.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `SANDBOX_QEMU_CONFIG` | `~/.config/llm-sandbox/qemu.json` | Image source, store and active/previous versions |
 | `SANDBOX_QEMU_DISK` | Configured active image | Explicit base image override |
-| `SANDBOX_QEMU_MEMORY_MIB` | `2048` | Guest RAM in MiB (512–1048576) |
-| `SANDBOX_QEMU_CPUS` | `2` | Guest vCPUs (1–1024) |
+| `SANDBOX_QEMU_MEMORY_MIB` | `8192` | Guest RAM in MiB (512–1048576); the guest's `/tmp` tmpfs shares it |
+| `SANDBOX_QEMU_CPUS` | `4` | Guest vCPUs (1–1024) |
 | `SANDBOX_QEMU_BOOT_TIMEOUT` | `600` | Seconds to guest readiness |
 | `SANDBOX_QEMU_BATCH_TIMEOUT` | `0` | Command seconds after readiness; zero means unlimited for ordinary batch runs |
 | `SANDBOX_QEMU_IDLE_TIMEOUT` | `0` | Established proxy tunnel inactivity seconds; zero keeps idle tunnels open |
@@ -420,7 +430,7 @@ python3 -m unittest discover -s tests
 python3 -m unittest discover -s prototypes/qemu
 ```
 
-The last command covers image preparation, experimental boundary fixtures,
+The last command covers source-image preparation, experimental boundary fixtures,
 compatibility entry points and the acceptance harness.
 
 An unlimited batch command can stay alive after readiness if an agent waits
