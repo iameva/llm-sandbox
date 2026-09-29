@@ -103,7 +103,7 @@ def credential(profile, dry_run):
     return string(key, "API key")
 
 
-def plan(harness, name, profile, dry_run=False):
+def plan(harness, name, profile, dry_run=False, model_explicit=False):
     records = []
     def arg(*values):
         records.extend(("arg", value) for value in values)
@@ -136,9 +136,13 @@ def plan(harness, name, profile, dry_run=False):
         raise ValueError("GPT in Claude Code needs anthropic_base_url pointing to an Anthropic-compatible gateway")
     if harness != "claude" and "anthropic_base_url" in profile and "base_url" not in profile:
         raise ValueError("this profile supplies only an Anthropic gateway endpoint; set base_url for this harness")
-    # Resume can restore a model from the old backend. Always send a model
-    # override with a named profile rather than trusting a saved default.
-    if not model:
+    # Resume can restore a model from the old backend. Every named backend
+    # except Pi with a native OpenAI provider sends an explicit model rather
+    # than trusting a saved default. Pi forwards a model only when one is
+    # given on the command line, so it keeps its own saved default and
+    # restores each session's model on resume.
+    pi_keeps_own_model = (harness == "pi" and provider == "openai" and "base_url" not in profile)
+    if not model and not pi_keeps_own_model:
         raise ValueError(f"set a model for {name!r} in backends.json or pass --model MODEL")
     base = endpoint(profile.get("base_url", "https://api.deepseek.com" if provider == "deepseek" else "https://api.openai.com/v1"))
     if login and ("base_url" in profile or "anthropic_base_url" in profile):
@@ -189,14 +193,14 @@ def plan(harness, name, profile, dry_run=False):
                 arg("--model", f"openai-codex/{model}")
             else:
                 arg("--provider", "openai-codex")
-                if model:
+                if model_explicit:
                     arg("--model", model)
         elif provider == "openai" and "base_url" not in profile:
             if harness == "omp":
                 arg("--model", f"openai/{model}")
             else:
                 arg("--provider", "openai")
-                if model:
+                if model_explicit:
                     arg("--model", model)
             secret("OPENAI_API_KEY", key)
         else:
@@ -306,12 +310,14 @@ def main():
     args = parser.parse_args()
     try:
         name, profile = load_profile(args.config, args.harness, args.backend, args.model)
-        records = plan(args.harness, name, profile, args.dry_run)
+        records = plan(args.harness, name, profile, args.dry_run, model_explicit=bool(args.model))
         if args.harness == "claude" and not args.dry_run:
             migrate_claude_sessions(Path.home() / ".config/llm-sandbox")
         if name:
+            forced = any(kind == "arg" and value == "--model" for kind, value in records)
+            label = profile.get("model", "harness default") if forced else "harness default"
             print(f"sandbox-run: {args.harness} backend={name} auth={profile['auth']} "
-                  f"model={profile.get('model', 'harness default')}; shared {args.harness} sessions", file=sys.stderr)
+                  f"model={label}; shared {args.harness} sessions", file=sys.stderr)
         for kind, value in records:
             sys.stdout.buffer.write(kind.encode() + b"\0" + value.encode() + b"\0")
     except (ValueError, OSError) as exc:

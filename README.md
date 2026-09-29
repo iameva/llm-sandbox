@@ -79,10 +79,11 @@ On the first Claude harness launch after updating, old files under `deepseek-cla
 
 An explicit API-key backend requires its key and never silently falls back to a subscription. For `chatgpt`, use each harness's own login flow: Codex `login`, Pi/OMP `/login`, or OpenCode `/connect`. The wrapper does not copy OAuth tokens between harnesses. Mounted harness configuration can still contain credentials for other providers; this feature selects runtime authentication, not a credential isolation boundary.
 
-DeepSeek defaults to `deepseek-v4-pro` with `deepseek-v4-flash` for fast tasks. Claude defaults to the `opus` alias. The installed ChatGPT profile uses `gpt-6-astra` for Codex and `gpt-5.6-sol` for Pi, OMP, and OpenCode, with `gpt-5.6-luna` for fast tasks, using subscription login without an OpenAI API key. Model access depends on your account; override the selection with `--model MODEL_ID`. These are the current coding models described in the [official model guide](https://learn.chatgpt.com/docs/models). Every named backend must resolve to an explicit model, including on resume, so a session cannot silently restore a model from the previous provider. No model catalog or software version is pinned by these profiles.
+DeepSeek defaults to `deepseek-v4-pro` with `deepseek-v4-flash` for fast tasks. Claude defaults to the `opus` alias. The installed ChatGPT profile uses `gpt-6-astra` for Codex and `gpt-5.6-sol` for Pi, OMP, and OpenCode, with `gpt-5.6-luna` for fast tasks, using subscription login without an OpenAI API key. Model access depends on your account; override the selection with `--model MODEL_ID`. These are the current coding models described in the [official model guide](https://learn.chatgpt.com/docs/models). Pi forwards a model only when you give one; without `--model` it keeps Pi's own model state, so a resumed session restores the model it last used and new sessions use Pi's saved default. Every named backend other than Pi must resolve to an explicit model, including on resume, so a session cannot silently restore a model from the previous provider. No model catalog or software version is pinned by these profiles.
 
 ```sh
-,pi-sandbox.sh --backend chatgpt --resume
+,pi-sandbox.sh --backend chatgpt --resume                       # restores the session's model
+,pi-sandbox.sh --backend chatgpt --model gpt-5.6-luna --resume  # this run uses gpt-5.6-luna
 ,omp-sandbox.sh --backend chatgpt --model gpt-5.6-luna --resume
 ,claude-sandbox.sh --backend deepseek --model deepseek-v4-flash --resume
 ```
@@ -134,11 +135,11 @@ Codex, Pi, OMP, and OpenCode default to ChatGPT login. Claude Code defaults to C
 }
 ```
 
-A profile can set `provider` (`anthropic`, `openai`, or `deepseek`), `auth` (`login` or `api_key`), `model`, `fast_model`, `key_env`, `key_file`, `base_url`, and `anthropic_base_url`. Built-in profiles supply their defaults; new profile names must supply their provider, authentication, and credential source. `harnesses` provides per-harness overrides. Selection order is command line, environment, then the harness entry in `defaults`; model selection follows command line, environment, harness override, profile default.
+A profile can set `provider` (`anthropic`, `openai`, or `deepseek`), `auth` (`login` or `api_key`), `model`, `fast_model`, `key_env`, `key_file`, `base_url`, and `anthropic_base_url`. Built-in profiles supply their defaults; new profile names must supply their provider, authentication, and credential source. `harnesses` provides per-harness overrides. Selection order is command line, environment, then the harness entry in `defaults`; model selection follows command line, environment, harness override, profile default. Pi is the exception for the `chatgpt` and `openai` backends: the wrapper forwards `--model` only when you set one, and otherwise leaves model selection to Pi's own saved default and session state.
 
 `key_env` names a host environment variable. If it is empty or unset, the helper reads `key_file`. Keep secrets out of the JSON itself. `SANDBOX_BACKENDS_FILE` selects an alternate host configuration file. Login profiles cannot override endpoints.
 
-Fast models are mapped to Claude's Haiku/subagent settings, OMP's fast role, OpenCode's small model, and Aider's weak model. OMP's slow and planning roles use the selected main model. Pi uses its selected main model. Explicit agent definitions or native options can override these harness defaults.
+Fast models are mapped to Claude's Haiku/subagent settings, OMP's fast role, OpenCode's small model, and Aider's weak model. OMP's slow and planning roles use the selected main model. Pi ignores `fast_model`; for the `chatgpt` and `openai` backends it also keeps its own model selection unless `--model` or `SANDBOX_MODEL` is given. Explicit agent definitions or native options can override these harness defaults.
 
 ### GPT through Claude Code
 

@@ -82,9 +82,24 @@ class ProfileTests(unittest.TestCase):
                     self.assertIn(('env', f'ANTHROPIC_DEFAULT_{family}_MODEL={model}'), records)
 
     def test_gpt_profiles_need_a_model_even_on_native_harnesses(self):
-        for harness in ['codex', 'pi', 'omp', 'opencode']:
+        for harness in ['codex', 'omp', 'opencode']:
             with self.subTest(harness=harness), self.assertRaisesRegex(ValueError, 'set a model'):
                 backends.plan(harness, 'chatgpt', backends.DEFAULTS['chatgpt'], True)
+
+    def test_pi_keeps_its_own_model_selection_without_an_override(self):
+        for name, profile in [('chatgpt', {**backends.DEFAULTS['chatgpt'], 'model': 'gpt-5.6-sol'}),
+                              ('openai', {**backends.DEFAULTS['openai'], 'model': 'gpt-5.6-sol'})]:
+            with self.subTest(backend=name):
+                args = lambda records: [value for kind, value in records if kind == 'arg']
+                provider = 'openai-codex' if name == 'chatgpt' else 'openai'
+                records = backends.plan('pi', name, profile, True)
+                self.assertEqual(args(records), ['--provider', provider])
+                explicit = backends.plan('pi', name, profile, True, model_explicit=True)
+                self.assertEqual(args(explicit), ['--provider', provider, '--model', 'gpt-5.6-sol'])
+
+    def test_pi_custom_api_backends_still_require_a_model(self):
+        with self.assertRaisesRegex(ValueError, 'set a model'):
+            backends.plan('pi', 'deepseek', {**backends.DEFAULTS['deepseek'], 'model': ''}, True)
 
     def test_login_and_api_key_profiles_stay_distinct(self):
         for harness in ['codex', 'pi', 'omp', 'opencode']:
@@ -183,14 +198,30 @@ class BackendRunnerTests(RunnerFixture):
                 result = self.launch(harness)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 args = self.argv()
+                self.assertFalse(any('API_KEY' in arg for arg in args))
+                if harness == 'pi':
+                    # Pi keeps its own model state; only the provider is selected.
+                    self.assertIn('--provider', args)
+                    self.assertNotIn('--model', args)
+                    continue
                 expected_model = 'gpt-6-astra'
                 self.assertTrue(any(expected_model in arg for arg in args))
-                self.assertFalse(any('API_KEY' in arg for arg in args))
                 if harness in ('omp', 'opencode'):
                     self.assertTrue(any('gpt-5.6-luna' in arg for arg in args))
         self.assertEqual(self.launch('claude').returncode, 0)
         self.assertIn('opus', self.argv())
         self.assertFalse(any(arg.startswith('ANTHROPIC_DEFAULT_') for arg in self.argv()))
+
+    def test_pi_forwards_only_an_explicit_model(self):
+        self.assertEqual(self.launch('pi', '--backend', 'chatgpt').returncode, 0)
+        args = self.argv()
+        self.assertIn('--provider', args)
+        self.assertNotIn('--model', args)
+        self.assertEqual(self.launch('pi', '--backend', 'chatgpt', '--model', 'gpt-5.6-luna').returncode, 0)
+        args = self.argv()
+        self.assertIn('--provider', args)
+        self.assertIn('--model', args)
+        self.assertIn('gpt-5.6-luna', args)
 
     def test_reinstall_keeps_user_profiles(self):
         path = self.home / '.config/llm-sandbox/backends.json'
