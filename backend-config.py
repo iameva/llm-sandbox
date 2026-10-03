@@ -18,7 +18,7 @@ DEFAULTS = {
     "openai": {"provider": "openai", "auth": "api_key",
                "key_env": "OPENAI_API_KEY", "key_file": "~/.config/openai.api"},
     "deepseek": {"provider": "deepseek", "auth": "api_key",
-                 "model": "deepseek-v4-pro", "fast_model": "deepseek-v4-flash",
+                 "model": "deepseek-v4-pro", "fast_model": "deepseek-flash",
                  "key_env": "DEEPSEEK_API_KEY", "key_file": "~/.config/deepseek.api"},
 }
 FIELDS = {"provider", "auth", "model", "fast_model", "key_env", "key_file",
@@ -140,7 +140,8 @@ def plan(harness, name, profile, dry_run=False, model_explicit=False):
     # except Pi with a native OpenAI provider sends an explicit model rather
     # than trusting a saved default. Pi forwards a model only when one is
     # given on the command line, so it keeps its own saved default and
-    # restores each session's model on resume.
+    # restores each session's model on resume. Pi 1.0 rejects --provider
+    # without --model, so the provider goes only with an explicit model.
     pi_keeps_own_model = (harness == "pi" and provider == "openai" and "base_url" not in profile)
     if not model and not pi_keeps_own_model:
         raise ValueError(f"set a model for {name!r} in backends.json or pass --model MODEL")
@@ -188,20 +189,29 @@ def plan(harness, name, profile, dry_run=False, model_explicit=False):
         if model:
             arg("--model", model)
     elif harness in {"pi", "omp"}:
+        # Pi and OMP ship native providers for these APIs, so the temporary
+        # extension provider is only needed when a profile redirects the
+        # endpoint: neither CLI reads a base URL from the environment.
+        native_deepseek = provider == "deepseek" and "base_url" not in profile
         if login:
             if harness == "omp":
                 arg("--model", f"openai-codex/{model}")
             else:
-                arg("--provider", "openai-codex")
                 if model_explicit:
-                    arg("--model", model)
+                    arg("--provider", "openai-codex", "--model", model)
+        elif native_deepseek:
+            secret("DEEPSEEK_API_KEY", key)
+            if harness == "omp":
+                arg("--model", f"deepseek/{model}")
+            else:
+                arg("--provider", "deepseek", "--model", model)
+            arg("--thinking", "high")
         elif provider == "openai" and "base_url" not in profile:
             if harness == "omp":
                 arg("--model", f"openai/{model}")
             else:
-                arg("--provider", "openai")
                 if model_explicit:
-                    arg("--model", model)
+                    arg("--provider", "openai", "--model", model)
             secret("OPENAI_API_KEY", key)
         else:
             if not model:
@@ -236,7 +246,14 @@ def plan(harness, name, profile, dry_run=False, model_explicit=False):
             if provider == "deepseek":
                 arg("--thinking", "high")
         if harness == "omp" and model:
-            selected_provider = "openai-codex" if login else ("sandbox_backend" if any(k == "asset" for k, _ in records) else "openai")
+            if login:
+                selected_provider = "openai-codex"
+            elif native_deepseek:
+                selected_provider = "deepseek"
+            elif any(k == "asset" for k, _ in records):
+                selected_provider = "sandbox_backend"
+            else:
+                selected_provider = "openai"
             arg("--smol", f"{selected_provider}/{fast}", "--slow", f"{selected_provider}/{model}",
                 "--plan", f"{selected_provider}/{model}")
     elif harness == "opencode":

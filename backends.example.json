@@ -2,7 +2,6 @@
   "defaults": {
     "claude": "claude",
     "codex": "chatgpt",
-    "pi": "chatgpt",
     "omp": "chatgpt",
     "opencode": "chatgpt"
   },
@@ -23,7 +22,7 @@
       "provider": "deepseek",
       "auth": "api_key",
       "model": "deepseek-v4-pro",
-      "fast_model": "deepseek-v4-flash",
+      "fast_model": "deepseek-flash",
       "key_env": "DEEPSEEK_API_KEY",
       "key_file": "~/.config/deepseek.api"
     }

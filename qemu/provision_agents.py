@@ -269,18 +269,22 @@ def main():
     env = {**os.environ, 'TERM': 'dumb', 'NO_COLOR': '1', 'http_proxy': proxy, 'https_proxy': proxy,
            'HTTP_PROXY': proxy, 'HTTPS_PROXY': proxy}
     user = pwd.getpwuid(1000)
-    # Fixed HTTPS repositories avoid a metalink selecting an HTTP mirror,
-    # which the CONNECT-only proxy intentionally does not support.
+    # protocol=https keeps the metalink from selecting an HTTP mirror, which
+    # the CONNECT-only proxy does not support. A metalink, not one fixed
+    # baseurl, lets dnf move to the next mirror when one serves a repomd.xml
+    # that names missing files (seen on dl.fedoraproject.org 2026-10-02).
+    # skip_if_unavailable=0 fails the build at the broken repo instead of
+    # going on without it and failing later on hundreds of missing deps.
     repos = Path('/tmp/sandbox-build-repos')
     repos.mkdir()
     repos.joinpath('fedora.repo').write_text(
         '[build-base]\nname=Fedora 44 base\n'
-        'baseurl=https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Everything/x86_64/os/\n'
-        'enabled=1\ngpgcheck=1\n'
+        'metalink=https://mirrors.fedoraproject.org/metalink?repo=fedora-44&arch=x86_64&protocol=https\n'
+        'enabled=1\ngpgcheck=1\nskip_if_unavailable=0\n'
         'gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-44-x86_64\n'
         '[build-updates]\nname=Fedora 44 updates\n'
-        'baseurl=https://dl.fedoraproject.org/pub/fedora/linux/updates/44/Everything/x86_64/\n'
-        'enabled=1\ngpgcheck=1\n'
+        'metalink=https://mirrors.fedoraproject.org/metalink?repo=updates-released-f44&arch=x86_64&protocol=https\n'
+        'enabled=1\ngpgcheck=1\nskip_if_unavailable=0\n'
         'gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-44-x86_64\n')
     root = os.statvfs('/')
     if root.f_blocks * root.f_frsize < MINIMUM_ROOT_BYTES:

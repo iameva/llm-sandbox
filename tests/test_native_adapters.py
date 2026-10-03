@@ -54,7 +54,7 @@ class NativeAdapterTests(unittest.TestCase):
                                'PI_OFFLINE': '1', 'PI_TELEMETRY': '0'}
                         project = Path(tmp) / 'project'
                         project.mkdir()
-                        for index, model in enumerate(['deepseek-v4-pro', 'deepseek-v4-flash']):
+                        for index, model in enumerate(['deepseek-v4-pro', 'deepseek-flash']):
                             profile = {**backends.DEFAULTS['deepseek'], 'model': model,
                                        'base_url': f'http://127.0.0.1:{server.server_port}'}
                             with patch.dict(os.environ, {'DEEPSEEK_API_KEY': 'local-test-key'}):

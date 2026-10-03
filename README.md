@@ -79,13 +79,13 @@ On the first Claude harness launch after updating, old files under `deepseek-cla
 
 An explicit API-key backend requires its key and never silently falls back to a subscription. For `chatgpt`, use each harness's own login flow: Codex `login`, Pi/OMP `/login`, or OpenCode `/connect`. The wrapper does not copy OAuth tokens between harnesses. Mounted harness configuration can still contain credentials for other providers; this feature selects runtime authentication, not a credential isolation boundary.
 
-DeepSeek defaults to `deepseek-v4-pro` with `deepseek-v4-flash` for fast tasks. Claude defaults to the `opus` alias. The installed ChatGPT profile uses `gpt-6-astra` for Codex and `gpt-5.6-sol` for Pi, OMP, and OpenCode, with `gpt-5.6-luna` for fast tasks, using subscription login without an OpenAI API key. Model access depends on your account; override the selection with `--model MODEL_ID`. These are the current coding models described in the [official model guide](https://learn.chatgpt.com/docs/models). Pi forwards a model only when you give one; without `--model` it keeps Pi's own model state, so a resumed session restores the model it last used and new sessions use Pi's saved default. Every named backend other than Pi must resolve to an explicit model, including on resume, so a session cannot silently restore a model from the previous provider. No model catalog or software version is pinned by these profiles.
+DeepSeek defaults to `deepseek-v4-pro` with `deepseek-flash` for fast tasks. Claude defaults to the `opus` alias. The installed ChatGPT profile uses `gpt-6-astra` for Codex and `gpt-5.6-sol` for Pi, OMP, and OpenCode, with `gpt-5.6-luna` for fast tasks, using subscription login without an OpenAI API key. Model access depends on your account; override the selection with `--model MODEL_ID`. These are the current coding models described in the [official model guide](https://learn.chatgpt.com/docs/models). Pi is an exception for the native `chatgpt` and `openai` backends: it forwards a model only when you give one, so a resumed session restores the model it last used and new sessions use Pi's saved default. Every other named backend must resolve to an explicit model, including on resume, so a session cannot silently restore a model from the previous provider. No model catalog or software version is pinned by these profiles.
 
 ```sh
 ,pi-sandbox.sh --backend chatgpt --resume                       # restores the session's model
 ,pi-sandbox.sh --backend chatgpt --model gpt-5.6-luna --resume  # this run uses gpt-5.6-luna
 ,omp-sandbox.sh --backend chatgpt --model gpt-5.6-luna --resume
-,claude-sandbox.sh --backend deepseek --model deepseek-v4-flash --resume
+,claude-sandbox.sh --backend deepseek --model deepseek-flash --resume
 ```
 
 Put wrapper options before harness-specific arguments or subcommands. Parsing stops at the first other argument, so prompts and native options remain intact. Both `--backend=NAME` and `--model=ID` work. `SANDBOX_BACKEND` and `SANDBOX_MODEL` provide environment defaults; command-line options take precedence. Without a backend selection or configured default, existing harness behavior is preserved.
@@ -94,14 +94,13 @@ Put wrapper options before harness-specific arguments or subcommands. Parsing st
 
 On the host, `./install.sh` creates `~/.config/llm-sandbox/backends.json` from `backends.example.json` if it is missing. Reinstalling preserves existing profiles. To apply these defaults to an existing configuration, edit that file using the example below.
 
-Codex, Pi, OMP, and OpenCode default to ChatGPT login. Claude Code defaults to Claude login, and Aider defaults to DeepSeek because its adapter requires an API key. DeepSeek remains selectable with `--backend deepseek` in every supported harness. Sign in to ChatGPT separately through each harness; no OpenAI API key is needed for this profile.
+Codex, OMP, and OpenCode default to ChatGPT login. Pi has no configured default, so it starts with its own saved model and session state until you select a backend with `--backend` or `SANDBOX_BACKEND`. Claude Code defaults to Claude login, and Aider defaults to DeepSeek because its adapter requires an API key. DeepSeek remains selectable with `--backend deepseek` in every supported harness. Sign in to ChatGPT separately through each harness; no OpenAI API key is needed for this profile.
 
 ```json
 {
   "defaults": {
     "claude": "claude",
     "codex": "chatgpt",
-    "pi": "chatgpt",
     "omp": "chatgpt",
     "opencode": "chatgpt"
   },
@@ -127,7 +126,7 @@ Codex, Pi, OMP, and OpenCode default to ChatGPT login. Claude Code defaults to C
       "provider": "deepseek",
       "auth": "api_key",
       "model": "deepseek-v4-pro",
-      "fast_model": "deepseek-v4-flash",
+      "fast_model": "deepseek-flash",
       "key_env": "DEEPSEEK_API_KEY",
       "key_file": "~/.config/deepseek.api"
     }
@@ -161,7 +160,7 @@ This combination requires a separately configured gateway that exposes the Anthr
 
 Then run `,claude-sandbox.sh --backend gpt-gateway --resume`. The credential is the gateway credential, which need not be your OpenAI API key. The gateway must be a public HTTPS host on the egress allowlist. The proxy refuses private and loopback destinations, so a gateway running on the host is not reachable from the VM. A ChatGPT login is not a substitute for this gateway configuration.
 
-The direct DeepSeek adapters use its [Anthropic-compatible endpoint](https://api-docs.deepseek.com/guides/anthropic_api/) for Claude Code and its [Responses endpoint](https://api-docs.deepseek.com/guides/responses_api/) for Codex. Pi and OMP load a temporary provider registration from a read-only mounted extension; no model configuration files or session paths are replaced. DeepSeek's [OMP integration guide](https://api-docs.deepseek.com/quick_start/agent_integrations/oh_my_pi/) describes the tool-call compatibility fields used here. Registered custom models currently use zero cost metadata, so harness cost estimates are not a billing estimate. Check the provider's usage dashboard for actual charges.
+The direct DeepSeek adapters use its [Anthropic-compatible endpoint](https://api-docs.deepseek.com/guides/anthropic_api/) for Claude Code and its [Responses endpoint](https://api-docs.deepseek.com/guides/responses_api/) for Codex. Pi and OMP use the native DeepSeek provider built into each harness. A profile that redirects the endpoint to a gateway loads a temporary provider registration from a read-only mounted extension, so no model configuration files or session paths are replaced. DeepSeek's [OMP integration guide](https://api-docs.deepseek.com/quick_start/agent_integrations/oh_my_pi/) describes the tool-call compatibility fields used for redirected endpoints. Registered custom models currently use zero cost metadata, so harness cost estimates are not a billing estimate. Check the provider's usage dashboard for actual charges.
 
 ## Network policy
 

@@ -93,13 +93,32 @@ class ProfileTests(unittest.TestCase):
                 args = lambda records: [value for kind, value in records if kind == 'arg']
                 provider = 'openai-codex' if name == 'chatgpt' else 'openai'
                 records = backends.plan('pi', name, profile, True)
-                self.assertEqual(args(records), ['--provider', provider])
+                self.assertEqual(args(records), [])
                 explicit = backends.plan('pi', name, profile, True, model_explicit=True)
                 self.assertEqual(args(explicit), ['--provider', provider, '--model', 'gpt-5.6-sol'])
 
-    def test_pi_custom_api_backends_still_require_a_model(self):
+    def test_pi_and_omp_use_the_native_deepseek_provider(self):
+        for harness in ['pi', 'omp']:
+            with self.subTest(harness=harness):
+                records = backends.plan(harness, 'deepseek', backends.DEFAULTS['deepseek'], True)
+                args = [value for kind, value in records if kind == 'arg']
+                self.assertIn(('secret', 'DEEPSEEK_API_KEY=DRY_RUN_KEY_NOT_LOADED'), records)
+                self.assertFalse(any(kind == 'asset' for kind, _ in records))
+                self.assertFalse(any(kind == 'env' and value.startswith('SANDBOX_PROVIDER_CONFIG=')
+                                     for kind, value in records))
+                if harness == 'pi':
+                    self.assertEqual(args, ['--provider', 'deepseek', '--model', 'deepseek-v4-pro',
+                                            '--thinking', 'high'])
+                else:
+                    self.assertEqual(args, ['--model', 'deepseek/deepseek-v4-pro', '--thinking', 'high',
+                                            '--smol', 'deepseek/deepseek-flash',
+                                            '--slow', 'deepseek/deepseek-v4-pro',
+                                            '--plan', 'deepseek/deepseek-v4-pro'])
+
+    def test_custom_api_backends_still_require_a_model(self):
+        profile = {**backends.DEFAULTS['deepseek'], 'model': '', 'base_url': 'https://gateway.example.org'}
         with self.assertRaisesRegex(ValueError, 'set a model'):
-            backends.plan('pi', 'deepseek', {**backends.DEFAULTS['deepseek'], 'model': ''}, True)
+            backends.plan('pi', 'deepseek', profile, True)
 
     def test_login_and_api_key_profiles_stay_distinct(self):
         for harness in ['codex', 'pi', 'omp', 'opencode']:
@@ -112,11 +131,15 @@ class ProfileTests(unittest.TestCase):
                 self.assertTrue(any(kind == 'secret' for kind, _ in api_records))
                 self.assertNotEqual(login_records, api_records)
 
-    def test_omp_uses_model_selector_for_extension_providers(self):
-        records = backends.plan('omp', 'deepseek', backends.DEFAULTS['deepseek'], True)
-        args = [value for kind, value in records if kind == 'arg']
-        self.assertNotIn('--provider', args)
-        self.assertIn('sandbox_backend/deepseek-v4-pro', args)
+    def test_redirected_endpoints_still_use_the_extension_provider(self):
+        for harness in ['pi', 'omp']:
+            with self.subTest(harness=harness):
+                profile = {**backends.DEFAULTS['deepseek'], 'base_url': 'https://gateway.example.org'}
+                records = backends.plan(harness, 'deepseek', profile, True)
+                args = [value for kind, value in records if kind == 'arg']
+                self.assertIn('--extension', args)
+                self.assertTrue(any('sandbox_backend' in value for value in args))
+                self.assertIn(('secret', 'SANDBOX_PROVIDER_API_KEY=DRY_RUN_KEY_NOT_LOADED'), records)
 
     def test_legacy_import_never_overwrites_sessions_or_credentials(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -181,9 +204,9 @@ class BackendRunnerTests(RunnerFixture):
         self.assertFalse((root / 'deepseek-claude').exists())
 
     def test_model_override_and_invalid_backend(self):
-        result = self.launch('claude', '--backend=deepseek', '--model', 'deepseek-v4-flash', '--resume')
+        result = self.launch('claude', '--backend=deepseek', '--model', 'deepseek-flash', '--resume')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('ANTHROPIC_MODEL=deepseek-v4-flash', self.argv())
+        self.assertIn('ANTHROPIC_MODEL=deepseek-flash', self.argv())
         self.capture.unlink()
         self.assertNotEqual(self.launch('pi', '--backend', 'missing').returncode, 0)
         self.assertFalse(self.capture.exists())
@@ -193,6 +216,7 @@ class BackendRunnerTests(RunnerFixture):
         path.unlink()
         subprocess.run(['sh', 'install.sh'], cwd=REPO, env=self.env, check=True, capture_output=True)
         self.assertTrue(path.exists())
+        self.assertNotIn('pi', json.loads(path.read_text())['defaults'])
         for harness in ('codex', 'pi', 'omp', 'opencode'):
             with self.subTest(harness=harness):
                 result = self.launch(harness)
@@ -200,8 +224,8 @@ class BackendRunnerTests(RunnerFixture):
                 args = self.argv()
                 self.assertFalse(any('API_KEY' in arg for arg in args))
                 if harness == 'pi':
-                    # Pi keeps its own model state; only the provider is selected.
-                    self.assertIn('--provider', args)
+                    # Pi has no installed default, so no backend arguments are selected.
+                    self.assertNotIn('--provider', args)
                     self.assertNotIn('--model', args)
                     continue
                 expected_model = 'gpt-6-astra'
@@ -215,7 +239,7 @@ class BackendRunnerTests(RunnerFixture):
     def test_pi_forwards_only_an_explicit_model(self):
         self.assertEqual(self.launch('pi', '--backend', 'chatgpt').returncode, 0)
         args = self.argv()
-        self.assertIn('--provider', args)
+        self.assertNotIn('--provider', args)
         self.assertNotIn('--model', args)
         self.assertEqual(self.launch('pi', '--backend', 'chatgpt', '--model', 'gpt-5.6-luna').returncode, 0)
         args = self.argv()
@@ -231,6 +255,8 @@ class BackendRunnerTests(RunnerFixture):
         self.assertEqual(path.read_text(), value)
         self.assertEqual(self.launch('pi').returncode, 0)
         self.assertIn('deepseek-v4-pro', self.argv())
+        self.assertFalse(any('sandbox_backend' in arg for arg in self.argv()))
+        self.assertFalse(any(arg.endswith('backend-provider.mjs') for arg in self.argv()))
 
     def test_retired_aider_default_does_not_block_launches(self):
         path = self.home / '.config/llm-sandbox/backends.json'
