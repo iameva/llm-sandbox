@@ -136,14 +136,15 @@ def plan(harness, name, profile, dry_run=False, model_explicit=False):
         raise ValueError("GPT in Claude Code needs anthropic_base_url pointing to an Anthropic-compatible gateway")
     if harness != "claude" and "anthropic_base_url" in profile and "base_url" not in profile:
         raise ValueError("this profile supplies only an Anthropic gateway endpoint; set base_url for this harness")
-    # Resume can restore a model from the old backend. Every named backend
-    # except Pi with a native OpenAI provider sends an explicit model rather
-    # than trusting a saved default. Pi forwards a model only when one is
-    # given on the command line, so it keeps its own saved default and
-    # restores each session's model on resume. Pi 1.0 rejects --provider
-    # without --model, so the provider goes only with an explicit model.
+    # Named backends normally send an explicit model so a resumed session
+    # cannot silently restore one from a previous provider. Pi's native
+    # OpenAI provider and Codex's ChatGPT login are exceptions: absent an
+    # explicit override, each harness keeps control of its own model state.
+    # Pi 1.0 rejects --provider without --model, so it selects that provider
+    # only when a model was explicitly requested.
     pi_keeps_own_model = (harness == "pi" and provider == "openai" and "base_url" not in profile)
-    if not model and not pi_keeps_own_model:
+    codex_keeps_own_model = (harness == "codex" and provider == "openai" and login)
+    if not model and not pi_keeps_own_model and not codex_keeps_own_model:
         raise ValueError(f"set a model for {name!r} in backends.json or pass --model MODEL")
     base = endpoint(profile.get("base_url", "https://api.deepseek.com" if provider == "deepseek" else "https://api.openai.com/v1"))
     if login and ("base_url" in profile or "anthropic_base_url" in profile):
@@ -186,7 +187,10 @@ def plan(harness, name, profile, dry_run=False, model_explicit=False):
             codex("model_providers.sandbox_backend.wire_api", "responses")
             codex("model_providers.sandbox_backend.requires_openai_auth", False)
             secret("SANDBOX_PROVIDER_API_KEY", key)
-        if model:
+        # On the native ChatGPT login, Codex owns its default model in
+        # config.toml (and its resume state). Only an explicit wrapper model
+        # should override it. API-key/custom backends still pin their model.
+        if model and (not codex_keeps_own_model or model_explicit):
             arg("--model", model)
     elif harness in {"pi", "omp"}:
         # Pi and OMP ship native providers for these APIs, so the temporary

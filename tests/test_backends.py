@@ -82,9 +82,23 @@ class ProfileTests(unittest.TestCase):
                     self.assertIn(('env', f'ANTHROPIC_DEFAULT_{family}_MODEL={model}'), records)
 
     def test_gpt_profiles_need_a_model_even_on_native_harnesses(self):
-        for harness in ['codex', 'omp', 'opencode']:
+        for harness in ['omp', 'opencode']:
             with self.subTest(harness=harness), self.assertRaisesRegex(ValueError, 'set a model'):
                 backends.plan(harness, 'chatgpt', backends.DEFAULTS['chatgpt'], True)
+
+    def test_codex_chatgpt_login_uses_its_configured_model_unless_overridden(self):
+        profile = {**backends.DEFAULTS['chatgpt'], 'model': 'gpt-6-astra'}
+        args = lambda records: [value for kind, value in records if kind == 'arg']
+        records = backends.plan('codex', 'chatgpt', profile, True)
+        self.assertEqual(args(records), ['-c', 'model_provider="openai"',
+                                         '-c', 'forced_login_method="chatgpt"'])
+        explicit = backends.plan('codex', 'chatgpt', profile, True, model_explicit=True)
+        self.assertEqual(args(explicit), ['-c', 'model_provider="openai"',
+                                          '-c', 'forced_login_method="chatgpt"',
+                                          '--model', 'gpt-6-astra'])
+        no_profile_model = backends.plan('codex', 'chatgpt', backends.DEFAULTS['chatgpt'], True)
+        self.assertEqual(args(no_profile_model), ['-c', 'model_provider="openai"',
+                                                  '-c', 'forced_login_method="chatgpt"'])
 
     def test_pi_keeps_its_own_model_selection_without_an_override(self):
         for name, profile in [('chatgpt', {**backends.DEFAULTS['chatgpt'], 'model': 'gpt-5.6-sol'}),
@@ -207,6 +221,10 @@ class BackendRunnerTests(RunnerFixture):
         result = self.launch('claude', '--backend=deepseek', '--model', 'deepseek-flash', '--resume')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('ANTHROPIC_MODEL=deepseek-flash', self.argv())
+        result = self.launch('codex', '--model', 'gpt-5.6-luna')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('--model', self.command())
+        self.assertIn('gpt-5.6-luna', self.command())
         self.capture.unlink()
         self.assertNotEqual(self.launch('pi', '--backend', 'missing').returncode, 0)
         self.assertFalse(self.capture.exists())
@@ -228,8 +246,12 @@ class BackendRunnerTests(RunnerFixture):
                     self.assertNotIn('--provider', args)
                     self.assertNotIn('--model', args)
                     continue
-                expected_model = 'gpt-6-astra'
-                self.assertTrue(any(expected_model in arg for arg in args))
+                if harness == 'codex':
+                    # The native ChatGPT login leaves model selection to Codex config/session state.
+                    self.assertNotIn('--model', args)
+                    self.assertIn('model_provider="openai"', args)
+                else:
+                    self.assertTrue(any('gpt-6-astra' in arg for arg in args))
                 if harness in ('omp', 'opencode'):
                     self.assertTrue(any('gpt-5.6-luna' in arg for arg in args))
         self.assertEqual(self.launch('claude').returncode, 0)
