@@ -19,13 +19,18 @@ try:
 except ImportError:
     from runtime_support import disk_cache, private_directory, validate_base_image
 
-AGENTS = {'claude', 'codex', 'pi', 'omp', 'opencode'}
+AGENTS = {'claude', 'codex', 'pi', 'omp', 'opencode', 'agy'}
+# Earlier images stay usable for rollback: those from before agy, and those
+# with the retired gemini in its place.
+SUPPORTED_AGENT_SETS = (AGENTS, AGENTS - {'agy'}, (AGENTS - {'agy'}) | {'gemini'})
+# Each image must also pass a version check for every agent its manifest lists.
+# agy and the retired gemini both keep state in ~/.gemini.
 REQUIRED_CHECKS = {'uid_1000', 'codex_sqlite_wal', 'omp_sqlite_wal', 'one_default_route',
                    'unlisted_connect_denied', 'direct_public_tcp_blocked',
                    'host_alias_tcp_blocked', 'writable:/workspace',
                    'writable:/home/fedora/.pi',
                    'writable:/home/fedora/.omp',
-                   *(name+'_version' for name in AGENTS)}
+                   'writable:/home/fedora/.gemini'}
 # Required in addition when the manifest records tools. Images published
 # before the toolchain was added record none and stay usable for rollback.
 TOOL_CHECKS = {'rust_src', 'symbol_fonts', 'browser_smoke'}
@@ -112,9 +117,10 @@ def verify_published(image):
     if not isinstance(manifest, dict):
         raise ValueError('image manifest must be an object')
     versions = manifest.get('versions', {})
-    if (manifest.get('ok') is not True or not isinstance(versions, dict) or set(versions) != AGENTS
+    if (manifest.get('ok') is not True or not isinstance(versions, dict)
+            or set(versions) not in SUPPORTED_AGENT_SETS
             or any(not isinstance(value, str) or not value.strip() for value in versions.values())):
-        raise ValueError('manifest must record a successful build and all five agent versions')
+        raise ValueError('manifest must record a successful build and every agent version')
     tools = manifest.get('tools')
     if tools is not None and (not isinstance(tools, dict) or not tools
                               or any(not isinstance(value, str) or not value.strip() for value in tools.values())):
@@ -125,18 +131,21 @@ def verify_published(image):
     return image, manifest
 
 
-def probe(image, store, tools=None):
-    """Boot a disposable candidate with empty state and no project or credentials."""
+def probe(image, store, tools=None, agents=None):
+    """Boot a disposable candidate with empty state and no project or credentials.
+
+    agents is the set the manifest lists; None, for adoption, accepts any supported set.
+    """
     directory = Path(tempfile.mkdtemp(prefix='probe-', dir=store))
     workspace = directory/'workspace'
     workspace.mkdir(mode=0o700)
     # Match runtime state mounts so they cannot hide installed executables
     # after a successful image build.
     state_arguments = []
-    for agent in ('pi', 'omp'):
+    for agent, target in (('pi', '.pi'), ('omp', '.omp'), ('agy', '.gemini')):
         state = directory/(agent+'-state')
         state.mkdir(mode=0o700)
-        state_arguments.extend(['--mount', str(state)+f':/home/fedora/.{agent}'])
+        state_arguments.extend(['--mount', str(state)+f':/home/fedora/{target}'])
     allow = directory/'allow.txt'
     allow.write_text('example.com\n')
     print(f'Candidate boot-check artifacts: {directory}', flush=True)
@@ -151,12 +160,15 @@ def probe(image, store, tools=None):
     if not isinstance(report, dict):
         raise RuntimeError('candidate boot report must be an object')
     checks, versions = report.get('checks', {}), report.get('versions', {})
-    required = REQUIRED_CHECKS | (TOOL_CHECKS | {'tool:'+name for name in tools} if tools else set())
+    reported = set(versions) if isinstance(versions, dict) else set()
+    expected = set(agents) if agents else reported if reported in SUPPORTED_AGENT_SETS else AGENTS
+    required = (REQUIRED_CHECKS | {name+'_version' for name in expected}
+                | (TOOL_CHECKS | {'tool:'+name for name in tools} if tools else set()))
     if (not isinstance(checks, dict) or not required.issubset(checks) or not isinstance(versions, dict)
-            or not all(value is True for value in checks.values()) or set(versions) != AGENTS):
+            or not all(value is True for value in checks.values()) or reported != expected):
         raise RuntimeError('candidate boot checks did not all pass')
     if any(not isinstance(value, str) or not value.strip() for value in versions.values()):
-        raise RuntimeError('candidate did not report all five agent versions')
+        raise RuntimeError('candidate did not report every agent version')
     if tools:
         print(f'Browser screenshots to inspect: {workspace}/browser-smoke', flush=True)
     return versions
@@ -164,7 +176,8 @@ def probe(image, store, tools=None):
 
 def select_image(config_path, config, candidate, store, tested_versions=None):
     image, manifest = verify_published(candidate)
-    versions = probe(image, store, manifest.get('tools')) if tested_versions is None else tested_versions
+    versions = (probe(image, store, manifest.get('tools'), set(manifest['versions']))
+                if tested_versions is None else tested_versions)
     if versions != manifest['versions']:
         raise RuntimeError('booted agent versions differ from the published manifest')
     # Recheck after boot; the candidate was opened only through an overlay.

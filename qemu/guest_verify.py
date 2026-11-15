@@ -30,10 +30,26 @@ def sqlite_wal_works(directory):
             writer.close()
 
 
-def agent_versions(environment):
+AGENTS = ('claude', 'codex', 'pi', 'omp', 'opencode', 'agy')
+AGENTS_RECORD = Path('/etc/sandbox-agents.json')
+
+
+def recorded_agents(record=AGENTS_RECORD):
+    """The agents this image's build installed, so older images stay usable for rollback.
+
+    The image manager decides which agent sets it accepts.
+    """
+    try:
+        recorded = json.loads(record.read_text())
+    except (OSError, ValueError):
+        return AGENTS
+    return tuple(recorded) if isinstance(recorded, dict) and recorded else AGENTS
+
+
+def agent_versions(environment, agents=AGENTS):
     checks = {}
     versions = {}
-    for agent in ('claude', 'codex', 'pi', 'omp', 'opencode'):
+    for agent in agents:
         try:
             result = subprocess.run([agent, '--version'], env=environment, stdin=subprocess.DEVNULL,
                                     capture_output=True, text=True, timeout=60, check=True)
@@ -131,7 +147,7 @@ def omp_sqlite_checks(mounts):
 
 
 def verify(mounts, sqlite_home, environment=None, image=False):
-    checks, versions = agent_versions(environment) if image else ({}, {})
+    checks, versions = agent_versions(environment, recorded_agents()) if image else ({}, {})
     tools = {}
     # Images built before the toolchain was added have no record; the image
     # manager requires these checks only for manifests that list tools.

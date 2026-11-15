@@ -32,7 +32,7 @@ class MonitorTests(unittest.TestCase):
 
     def test_success_requires_every_version(self):
         self.write_report({'ok': True, 'versions': {'codex': '1'}})
-        with self.assertRaisesRegex(RuntimeError, 'five agent versions'):
+        with self.assertRaisesRegex(RuntimeError, 'version for every agent'):
             read_report(self.base/'build-result.json')
 
     def test_success_requires_every_tool(self):

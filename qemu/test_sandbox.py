@@ -9,7 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from qemu.sandbox import USER_DATA, qemu_command, launch_settings
 from qemu.proxy_process import Processes
-from qemu.guest_verify import sqlite_wal_works, agent_versions, omp_sqlite_checks, tool_versions, TOOLS
+from qemu.guest_verify import (sqlite_wal_works, agent_versions, omp_sqlite_checks, recorded_agents,
+                                tool_versions, AGENTS, TOOLS)
 
 
 class SandboxTests(unittest.TestCase):
@@ -28,17 +29,30 @@ class SandboxTests(unittest.TestCase):
                      subprocess.TimeoutExpired('codex', 60),
                      subprocess.CompletedProcess([], 0, ''),
                      FileNotFoundError('omp missing'),
-                     subprocess.CompletedProcess([], 0, 'opencode 1\n')]
+                     subprocess.CompletedProcess([], 0, 'opencode 1\n'),
+                     subprocess.CompletedProcess([], 0, 'agy 1\n')]
         with patch('qemu.guest_verify.subprocess.run', side_effect=responses) as run:
             checks, versions = agent_versions(environment)
         self.assertEqual(checks, {'claude_version': True, 'codex_version': False,
-                                 'pi_version': False, 'omp_version': False, 'opencode_version': True})
+                                 'pi_version': False, 'omp_version': False, 'opencode_version': True,
+                                 'agy_version': True})
         self.assertEqual(versions['opencode'], 'opencode 1')
-        self.assertEqual(run.call_count, 5)
+        self.assertEqual(run.call_count, 6)
         for call in run.call_args_list:
             self.assertIs(call.kwargs['env'], environment)
             self.assertEqual(call.kwargs['timeout'], 60)
             self.assertEqual(call.kwargs['stdin'], subprocess.DEVNULL)
+
+    def test_image_record_selects_agents_to_check(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record = Path(directory)/'sandbox-agents.json'
+            self.assertEqual(recorded_agents(record), AGENTS)
+            # Earlier images record their own agents, including the retired gemini.
+            record.write_text('{"claude": "1", "codex": "1", "pi": "1", "omp": "1", "opencode": "1", "gemini": "1"}')
+            self.assertEqual(recorded_agents(record), ('claude', 'codex', 'pi', 'omp', 'opencode', 'gemini'))
+            for broken in ('[]', '{}', 'not json'):
+                record.write_text(broken)
+                self.assertEqual(recorded_agents(record), AGENTS)
 
     def test_tool_probes_record_first_line_and_fail_missing_tools(self):
         environment = {'PATH': '/guest/bin'}

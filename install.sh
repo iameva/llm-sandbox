@@ -11,12 +11,12 @@ BIN="${HOME}/.local/bin"
 CONF="${HOME}/.config/llm-sandbox"
 mkdir -p "$BIN" "$CONF"
 
-for agent in claude codex llm opencode pi omp; do
+for agent in agy claude codex llm opencode pi omp; do
     install -m 0755 sandbox-run.sh "$BIN/,${agent}-sandbox.sh"
 done
 
-# Aider was removed; drop its entry point from an earlier install.
-rm -f "$BIN/,aider-sandbox.sh"
+# Aider and Gemini were removed; drop their entry points from an earlier install.
+rm -f "$BIN/,aider-sandbox.sh" "$BIN/,gemini-sandbox.sh"
 
 install -m 0755 sandbox-run.sh "$BIN/,deepseek-claude-code.sh"
 install -m 0755 sandbox-run.sh "$BIN/,sandbox-run.sh"

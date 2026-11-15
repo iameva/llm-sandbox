@@ -23,7 +23,7 @@ DEFAULTS = {
 }
 FIELDS = {"provider", "auth", "model", "fast_model", "key_env", "key_file",
           "base_url", "anthropic_base_url", "harnesses"}
-HARNESSES = {"claude", "codex", "pi", "omp", "opencode", "llm"}
+HARNESSES = {"claude", "codex", "pi", "omp", "opencode", "agy", "llm"}
 # Removed harnesses. install.sh keeps a user's backends.json, and the old
 # example file set an aider default, so its key must not block every launch.
 RETIRED_HARNESSES = {"aider"}
@@ -115,6 +115,10 @@ def plan(harness, name, profile, dry_run=False, model_explicit=False):
         arg("-c", f"{key}={json.dumps(value)}")
 
     model = profile.get("model", "")
+    # No built-in provider serves Antigravity, and agy has no --model flag.
+    # It keeps its own Google login and model choice in the mounted ~/.gemini.
+    if harness == "agy" and (name or model):
+        raise ValueError("agy takes no --backend or --model; choose its model inside agy")
     if not name:
         if model:
             if harness == "llm":

@@ -2,7 +2,7 @@
 """Run two concurrent installed-launcher probes with disposable state.
 
 No sudo, downloads, real credentials, or project exports. Each VM uses 2 GiB.
-The disk must be the already built five-agent image.
+The disk must be an already built agent image.
 """
 import argparse
 import fcntl

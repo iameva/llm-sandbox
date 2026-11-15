@@ -67,7 +67,7 @@ class RunnerTests(RunnerFixture):
             "codex": ["codex", "--dangerously-bypass-approvals-and-sandbox"],
             "deepseek-claude": ["claude", "--dangerously-skip-permissions", "--model", "deepseek-v4-pro"],
             "opencode": ["opencode"], "pi": ["pi"], "omp": ["omp"],
-            "llm": ["zsh"],
+            "agy": ["agy", "--dangerously-skip-permissions"], "llm": ["zsh"],
         }
         for agent, command in commands.items():
             with self.subTest(agent=agent):
@@ -141,8 +141,25 @@ class RunnerTests(RunnerFixture):
         self.assertEqual(targets, ["/home/fedora/.claude", "/home/fedora/.config/codex", "/home/fedora/.orca"])
         self.assertNotEqual(self.launch("llm", SANDBOX_LLM_AGENTS="aider").returncode, 0)
 
+    def test_agy_mounts_its_home_and_takes_no_backend_or_model(self):
+        state = f"{self.home}/.config/llm-sandbox/agy:/home/fedora/.gemini"
+        self.assertEqual(self.launch("agy", "--continue").returncode, 0)
+        self.assertEqual(self.values("--mount"), [state])
+        self.assertEqual(self.command(), ["agy", "--dangerously-skip-permissions", "--continue"])
+        self.assertIn("AGY_CLI_DISABLE_AUTO_UPDATE=true", self.values("--env"))
+        self.assertIn("SSH_CONNECTION=10.0.2.2 0 10.0.2.15 22", self.values("--env"))
+        self.assertEqual(self.launch("llm", SANDBOX_LLM_AGENTS="agy").returncode, 0)
+        self.assertEqual(self.values("--mount"), [state])
+        for args, env in ((["--backend", "deepseek"], {}), (["--model", "x"], {}), ([], {"SANDBOX_MODEL": "x"})):
+            with self.subTest(args=args, env=env):
+                self.capture.unlink(missing_ok=True)
+                result = self.launch("agy", *args, **env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("agy takes no --backend or --model", result.stderr)
+                self.assertFalse(self.capture.exists())
+
     def test_unknown_and_removed_agents_are_errors(self):
-        for agent in ("missing", "aider"):
+        for agent in ("missing", "aider", "gemini"):
             with self.subTest(agent=agent):
                 self.assertNotEqual(self.launch(agent).returncode, 0)
                 self.assertFalse(self.capture.exists())

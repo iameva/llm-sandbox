@@ -164,6 +164,18 @@ configure_agent() {
         MOUNTS=("pi:${HOME_IN_SANDBOX}/.pi")
         CMD=(pi)
         ;;
+    agy)
+        # Antigravity keeps its state in ~/.gemini/antigravity-cli. The
+        # image installs agy at ~/.local/bin, so this mount cannot hide it.
+        MOUNTS=("agy:${HOME_IN_SANDBOX}/.gemini")
+        # The VM has no keyring service. Third-party reports say agy stores
+        # its login in a file and offers a paste-the-code login when it
+        # sees SSH_CONNECTION; neither has been tried in this VM.
+        ENVS=("SSH_CONNECTION=10.0.2.2 0 10.0.2.15 22"
+              # An update would land in the discarded VM disk.
+              "AGY_CLI_DISABLE_AUTO_UPDATE=true")
+        CMD=(agy --dangerously-skip-permissions)
+        ;;
     opencode)
         MOUNTS=(
             "opencode:${HOME_IN_SANDBOX}/.config/opencode"
@@ -180,7 +192,7 @@ configure_agent() {
         local requested="${SANDBOX_LLM_AGENTS:-}"
         if [[ -z "$requested" ]]; then
             echo "sandbox-run: llm shell started with no agent credentials." >&2
-            echo "sandbox-run: add them with SANDBOX_LLM_AGENTS=claude,codex,opencode" >&2
+            echo "sandbox-run: add them with SANDBOX_LLM_AGENTS=claude,codex,opencode,agy" >&2
         fi
         local want
         IFS=, read -ra want <<< "$requested"
@@ -198,6 +210,8 @@ configure_agent() {
                         "opencode:${HOME_IN_SANDBOX}/.config/opencode"
                         "local-opencode:${HOME_IN_SANDBOX}/.local/share/opencode"
                     ) ;;
+                agy)
+                    MOUNTS+=("agy:${HOME_IN_SANDBOX}/.gemini") ;;
                 "") ;;
                 *) die "SANDBOX_LLM_AGENTS: unknown agent '$w'" ;;
             esac

@@ -58,5 +58,18 @@ auth.openai.com                              # API calls + websocket
 # than widening this further.
 chatgpt.com                                  # installer, probably auth
 
+# --- agy (Antigravity) ---
+# From third-party reports, not measured. The Google sign-in page opens in
+# a host browser, so accounts.google.com is not listed. Telemetry
+# (play.googleapis.com) and the self-updater stay unlisted; feature flags
+# (antigravity-unleash.goog) too, until a refusal shows agy needs them.
+cloudcode-pa.googleapis.com                  # API calls
+daily-cloudcode-pa.googleapis.com            # API calls, account check
+generativelanguage.googleapis.com            # API calls, Gemini API key
+oauth2.googleapis.com                        # login code exchange, token refresh
+www.googleapis.com                           # account details after login
+lh3.googleusercontent.com
+
 # Keep example.com unlisted: --check expects the proxy to return CONNECT
 # 403 for it in enforce mode. This checks the proxy policy, not direct egress.
+

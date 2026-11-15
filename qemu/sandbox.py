@@ -189,7 +189,7 @@ def main():
     parser.add_argument('--allow-file', type=Path, required=True, help='explicit HTTPS hostname allowlist')
     parser.add_argument('--virtiofsd', default=shutil.which('virtiofsd') or '/usr/libexec/virtiofsd')
     parser.add_argument('--check', action='store_true', help='validate inputs and tools without writing or starting anything')
-    parser.add_argument('--agent', choices=['shell', 'claude', 'codex', 'pi', 'omp', 'opencode'], default='shell')
+    parser.add_argument('--agent', choices=['shell', 'claude', 'codex', 'pi', 'omp', 'opencode', 'agy'], default='shell')
     parser.add_argument('--vm-dir', type=Path,
                         help='dedicated VM storage directory; guest home and logins persist inside its disk')
     parser.add_argument('--mount', action='append', default=[], help='explicit live state directory SOURCE:GUEST_TARGET')

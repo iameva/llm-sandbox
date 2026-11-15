@@ -59,8 +59,8 @@ the normal publication manifest. It does not need another download or build:
 
 First stop any process that might be writing that source disk. Adoption makes
 a full copy in a new store directory, checks the qcow2 structure, makes the
-copy read-only, and boots it through a disposable overlay. It checks all five
-agent versions and the launcher's identity, filesystem, SQLite and network
+copy read-only, and boots it through a disposable overlay. It checks every
+installed agent's version and the launcher's identity, filesystem, SQLite and network
 smoke checks. It then records the digest and observed versions in a manifest
 and selects the published `agents.qcow2`. The original file and its permissions
 remain unchanged. Adoption validates usability; it does not establish the
@@ -96,7 +96,7 @@ The first command only checks prerequisites and creates no files. The second:
    through its dedicated proxy. No project, host credentials or shared agent
    state are exported. Only a temporary report directory is shared.
 3. Grows the copy to a 30G virtual disk, then installs the current releases
-   of Claude, Codex, Pi, OMP and OpenCode and the toolchain the old container
+   of Claude, Codex, Pi, OMP, OpenCode and Antigravity and the toolchain the old container
    image carried: Rust stable with `rust-src`, Go, Node and npm, Playwright
    with Firefox, Chromium and WebKit in `/opt/ms-playwright`, the browser libraries
    (plus pinned Ubuntu 24.04 libraries WebKit needs and Fedora lacks) and
@@ -110,7 +110,7 @@ The first command only checks prerequisites and creates no files. The second:
 4. Waits for shutdown, runs `qemu-img check`, hashes the image, writes the
    manifest and publishes `agents.qcow2` with mode `0400`.
 5. Boots the candidate in a disposable run with a fresh empty workspace, no
-   shared agent state and an enforcing proxy. All five version checks, every
+   shared agent state and an enforcing proxy. Every agent version check, every
    tool check, a launch of both browsers and the runtime smoke checks must
    pass, with agent versions matching the manifest. The browser screenshots
    stay in the printed boot-check directory under `workspace/browser-smoke`;

@@ -20,6 +20,7 @@ AGENTS = {
     'pi': (None, None),  # Keep executables outside the shared ~/.pi state.
     'omp': ('https://omp.sh/install', ['sh']),
     'opencode': ('https://opencode.ai/install', ['bash']),
+    'agy': ('https://antigravity.google/cli/install.sh', ['bash']),
 }
 
 
@@ -327,7 +328,11 @@ def main():
             script = f'{user.pw_dir}/install-{agent}.sh'
             as_user(['curl', '-q', '-fsSL', '--proto', '=https', '--proto-redir', '=https',
                      '--connect-timeout', '30', '--max-time', '180', '--retry', '2', '--retry-max-time', '180', url, '-o', script], timeout=400)
-            arguments = ['--no-modify-path'] if agent == 'opencode' else []
+            # The guest session sets PATH, so opencode need not edit shell
+            # profiles. agy's installer takes only --dir and --help; pin the
+            # binary outside the shared ~/.gemini state.
+            arguments = {'opencode': ['--no-modify-path'],
+                         'agy': ['--dir', f'{user.pw_dir}/.local/bin']}.get(agent, [])
             stage(f'Installing {agent}')
             as_user([*interpreter, script, *arguments], stdin=subprocess.DEVNULL, timeout=1200)
             Path(script).unlink()
@@ -351,7 +356,7 @@ def main():
             raise
         versions[agent] = version.stdout.strip()
         print(f'{agent}: {versions[agent]}', flush=True)
-    stage('All five agents installed')
+    stage('All agents installed')
     Path('/etc/sandbox-agents.json').write_text(json.dumps(versions, indent=2))
     install_rust(as_user, user.pw_dir)
     stage('Checking tool versions')

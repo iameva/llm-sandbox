@@ -31,7 +31,7 @@ class BuildTests(unittest.TestCase):
         self.assertIn('tee /workspace/provision.log', script)
 
     def test_exact_requested_agents_use_https_installers(self):
-        self.assertEqual(set(AGENTS), {'claude', 'codex', 'pi', 'omp', 'opencode'})
+        self.assertEqual(set(AGENTS), {'claude', 'codex', 'pi', 'omp', 'opencode', 'agy'})
         for name, (url, interpreter) in AGENTS.items():
             if name in ('claude', 'pi'):
                 continue

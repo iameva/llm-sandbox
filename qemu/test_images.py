@@ -159,7 +159,7 @@ class ImageTests(unittest.TestCase):
             mounts = [command[index+1].split(':', 1)
                       for index, value in enumerate(command) if value == '--mount']
             self.assertEqual({target for source, target in mounts},
-                             {'/home/fedora/.pi', '/home/fedora/.omp'})
+                             {'/home/fedora/.pi', '/home/fedora/.omp', '/home/fedora/.gemini'})
             for source, target in mounts:
                 self.assertTrue(Path(source).is_relative_to(self.root))
                 self.assertEqual(list(Path(source).iterdir()), [])
@@ -175,8 +175,25 @@ class ImageTests(unittest.TestCase):
             for self.probe_report in reports:
                 with self.assertRaises(RuntimeError):
                     images.probe(self.first, self.root)
-            self.probe_report = {'checks': dict.fromkeys(images.REQUIRED_CHECKS, True), 'versions': self.versions}
+            checks = dict.fromkeys(images.REQUIRED_CHECKS, True)
+            # Every listed agent needs its own version check.
+            self.probe_report = {'checks': checks, 'versions': self.versions}
+            with self.assertRaises(RuntimeError):
+                images.probe(self.first, self.root)
+            checks.update({name+'_version': True for name in images.AGENTS})
             self.assertEqual(images.probe(self.first, self.root), self.versions)
+            self.assertEqual(images.probe(self.first, self.root, agents=images.AGENTS), self.versions)
+            # An earlier image passes adoption and its own manifest, never the current set.
+            for earlier in images.SUPPORTED_AGENT_SETS[1:]:
+                legacy = {name: '1.0' for name in earlier}
+                self.probe_report = {'checks': {**{key: True for key in checks if key != 'agy_version'},
+                                                **{name+'_version': True for name in earlier}},
+                                     'versions': legacy}
+                self.assertEqual(images.probe(self.first, self.root), legacy)
+                self.assertEqual(images.probe(self.first, self.root, agents=earlier), legacy)
+                with self.assertRaises(RuntimeError):
+                    images.probe(self.first, self.root, agents=images.AGENTS)
+            self.probe_report = {'checks': checks, 'versions': self.versions}
             # A manifest listing tools makes their checks mandatory; a guest
             # that skipped them (no tool record) cannot pass.
             tools = {'cargo': '1', 'playwright': '1'}
@@ -185,6 +202,21 @@ class ImageTests(unittest.TestCase):
             self.probe_report['checks'].update(dict.fromkeys(
                 [*images.TOOL_CHECKS, 'tool:cargo', 'tool:playwright'], True))
             self.assertEqual(images.probe(self.first, self.root, tools), self.versions)
+
+    def test_earlier_images_stay_usable_for_rollback(self):
+        for earlier in images.SUPPORTED_AGENT_SETS[1:]:
+            legacy = {name: '1.0' for name in earlier}
+            images.atomic_json(self.second.with_name('manifest.json'), {
+                'ok': True, 'versions': legacy, 'sha256': images.digest(self.second)})
+            with patch.object(images, 'image_tool'), patch.object(images, 'probe', return_value=legacy) as boot:
+                self.assertEqual(self.main('activate', str(self.second)), 0)
+            self.assertEqual(boot.call_args.args[3], earlier)
+            self.assertEqual(images.load_config(self.config_path)['active_image'], str(self.second))
+        images.atomic_json(self.second.with_name('manifest.json'), {
+            'ok': True, 'versions': {'codex': '1.0'}, 'sha256': images.digest(self.second)})
+        with patch.object(images, 'probe') as boot:
+            self.assertEqual(self.main('activate', str(self.second)), 2)
+            boot.assert_not_called()
 
     def test_malformed_configuration_and_manifest_fail_cleanly(self):
         self.second.with_name('manifest.json').write_text('[]')

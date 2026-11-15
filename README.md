@@ -15,7 +15,7 @@ sh install.sh
 
 `install.sh` installs the launchers, the image manager and the runtime; it never builds or downloads an image. `,sandbox-image update` builds a new image in an isolated build VM, boots it to check every agent, tool and both browsers, then selects it for future launches. Running VMs keep their base. Rerun `install.sh` after pulling changes, and `update` to refresh agents and tools. See the [image lifecycle](qemu/IMAGE_LIFECYCLE.md) for configuration, staged activation and rollback.
 
-The image holds Claude, Codex, Pi, OMP and OpenCode at their current releases, plus Rust stable (with `rust-src`), Go, Node and npm, zsh, Neovim, Vim and the other tools listed in `qemu/guest_verify.py`. Playwright's Firefox, Chromium and WebKit live read-only in `/opt/ms-playwright` (`PLAYWRIGHT_BROWSERS_PATH`). WebKit is Playwright's Ubuntu 24.04 build, so the image adds pinned Ubuntu copies of ICU 74, libjpeg8 and libx264 that Fedora lacks; a project pinned to another Playwright version should point that variable under `/workspace`. The Playwright version is pinned in `qemu/provision_agents.py`, because each release expects one browser build. Packages installed during a session disappear with its VM; change the recipe and rebuild to keep them.
+The image holds Claude, Codex, Pi, OMP, OpenCode and Antigravity (`agy`) at their current releases, plus Rust stable (with `rust-src`), Go, Node and npm, zsh, Neovim, Vim and the other tools listed in `qemu/guest_verify.py`. Playwright's Firefox, Chromium and WebKit live read-only in `/opt/ms-playwright` (`PLAYWRIGHT_BROWSERS_PATH`). WebKit is Playwright's Ubuntu 24.04 build, so the image adds pinned Ubuntu copies of ICU 74, libjpeg8 and libx264 that Fedora lacks; a project pinned to another Playwright version should point that variable under `/workspace`. The Playwright version is pinned in `qemu/provision_agents.py`, because each release expects one browser build. Packages installed during a session disappear with its VM; change the recipe and rebuild to keep them.
 
 `install.sh` backs up a differing installed allowlist to `egress-allowlist.txt.bak` before replacing it. Each launch loads the allowlist when it starts.
 
@@ -27,15 +27,16 @@ Change into the project you want to work on, then run an installed entry point:
 ,claude-sandbox.sh
 ,codex-sandbox.sh
 ,opencode-sandbox.sh
+,agy-sandbox.sh
 ,pi-sandbox.sh
 ,omp-sandbox.sh
 ```
 
-Missing configuration directories are created on first launch. Authenticate from inside the appropriate sandbox using the agent's own login flow. Codex configuration is mounted at `/home/fedora/.config/codex`, separate from its executable installation. Claude's global JSON configuration lives inside its mounted directory so file replacement is atomic; a legacy configuration is copied only when the new file is absent or empty.
+Missing configuration directories are created on first launch. Authenticate from inside the appropriate sandbox using the agent's own login flow. Antigravity's Google login should print a URL: open it in a host browser and paste the code back. The redirect page will not load; paste the whole address if no code is shown. Its state, including the login, lives in `~/.config/llm-sandbox/agy`, mounted at `/home/fedora/.gemini`. `agy` takes no `--backend` or `--model`; choose its model inside agy. Codex configuration is mounted at `/home/fedora/.config/codex`, separate from its executable installation. Claude's global JSON configuration lives inside its mounted directory so file replacement is atomic; a legacy configuration is copied only when the new file is absent or empty.
 
 `,deepseek-claude-code.sh` is an alias for Claude with the DeepSeek backend. It shares Claude's configuration and sessions, and reads the DeepSeek key from `DEEPSEEK_API_KEY` or the host file `~/.config/deepseek.api`.
 
-Every agent supports `--shell` as its first argument. `,llm-sandbox.sh` opens a shell without agent credentials; use `SANDBOX_LLM_AGENTS=claude,codex,opencode` to opt into those mounts. Additional arguments are passed through unchanged.
+Every agent supports `--shell` as its first argument. `,llm-sandbox.sh` opens a shell without agent credentials; use `SANDBOX_LLM_AGENTS=claude,codex,opencode,agy` to opt into those mounts. Additional arguments are passed through unchanged.
 
 ```sh
 ,codex-sandbox.sh --shell
@@ -210,7 +211,7 @@ Codex state. Workspace and shared agent-state changes persist. Other guest
 disk changes are discarded.
 
 State exposure follows the chosen launcher. For example, Codex shares codex
-and orca, Claude shares claude, and OpenCode shares opencode and local-opencode.
+and orca, Claude shares claude, OpenCode shares opencode and local-opencode, and Antigravity shares agy.
 The shell launcher shares no agent state unless SANDBOX_LLM_AGENTS selects it.
 This is live sharing of sandbox-specific state, not a mount of your whole
 home. Tools can read and modify all selected state. Concurrent edits and
@@ -229,9 +230,10 @@ an image implicitly.
 
 The QEMU builder installs Pi with npm under `~/.local`, outside its shared
 `~/.pi` state directory. OMP is installed directly at `~/.local/bin/omp`,
-outside shared `~/.omp` state. Image activation checks both agents with empty
-state mounts to catch installations hidden during normal launches. If either
-agent fails with `No such file or directory` after an image update, run
+outside shared `~/.omp` state. Antigravity's installer puts `agy` at `~/.local/bin/agy`,
+outside shared `~/.gemini` state. Image activation checks these agents with empty
+state mounts to catch installations hidden during normal launches. If one
+fails with `No such file or directory` after an image update, run
 `sh install.sh` from the updated repository, then
 `,sandbox-image update --allow-downloads` to rebuild with this layout.
 
