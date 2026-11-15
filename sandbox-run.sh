@@ -16,9 +16,13 @@
 # --check boots the same configuration and runs the guest smoke checks:
 #     ,claude-sandbox.sh --check
 #
-# Backend options (before harness arguments):
+# Wrapper options (before harness arguments, --shell or --check):
 #   --backend NAME   Choose a profile from backends.json or a built-in profile.
 #   --model MODEL    Override the profile model for this launch.
+#   --mcp-port PORT  Expose a host loopback MCP server (repeatable).
+#   --no-host-mcp    Disable host MCP forwarding, ignoring SANDBOX_MCP_PORTS.
+# --no-host-mcp conflicts with --mcp-port. Forwarding is disabled by default.
+# Native harness options (including pi's --no-mcp) pass through untouched.
 # Sessions remain in the harness directory when the backend changes.
 #
 # Environment:
@@ -28,6 +32,8 @@
 #   SANDBOX_QEMU_CONFIG    Image selection, default ~/.config/llm-sandbox/qemu.json
 #   SANDBOX_QEMU_DISK      Explicit base image; overrides the selection
 #   SANDBOX_ALLOW_FILE     Egress allowlist, default the installed copy
+#   SANDBOX_MCP_PORTS      Opt-in host MCP ports, comma-separated (1024–65535);
+#                          ignored by --no-host-mcp
 #   SANDBOX_QEMU_MEMORY_MIB, _CPUS, _BOOT_TIMEOUT, _BATCH_TIMEOUT,
 #   _IDLE_TIMEOUT, _CACHE_DIR, _KEEP_ARTIFACTS
 #                     Passed to qemu/sandbox.py; see README.
@@ -78,6 +84,8 @@ fi
 # The legacy entry point is an alias, not a separate harness or session store.
 BACKEND="${SANDBOX_BACKEND:-}"
 MODEL_OVERRIDE="${SANDBOX_MODEL:-}"
+MCP_PORTS=()
+NO_HOST_MCP=0
 if [[ "$AGENT" == "deepseek-claude" ]]; then
     AGENT=claude
     BACKEND="${BACKEND:-deepseek}"
@@ -96,8 +104,31 @@ while [[ $# -gt 0 ]]; do
             MODEL_OVERRIDE="${1#*=}"
             [[ -n "$MODEL_OVERRIDE" ]] || die "--model requires a value"
             shift ;;
+        --mcp-port)
+            [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || die "--mcp-port requires a value"
+            MCP_PORTS+=("$2")
+            shift 2 ;;
+        --mcp-port=*)
+            MCP_PORTS+=("${1#*=}")
+            shift ;;
+        --no-host-mcp)
+            NO_HOST_MCP=1
+            shift ;;
         *) break ;;
     esac
+done
+# Delay inherited-port parsing so --no-host-mcp ignores even malformed env.
+# Otherwise preserve the environment-first, explicit-options-second order.
+if [[ "$NO_HOST_MCP" == "1" ]]; then
+    [[ ${#MCP_PORTS[@]} -eq 0 ]] || die "--no-host-mcp cannot be combined with --mcp-port"
+elif [[ -n "${SANDBOX_MCP_PORTS:-}" ]]; then
+    [[ "$SANDBOX_MCP_PORTS" =~ ^[0-9]+(,[0-9]+)*$ ]] || die "SANDBOX_MCP_PORTS must be comma-separated port numbers"
+    IFS=, read -r -a ENV_MCP_PORTS <<< "$SANDBOX_MCP_PORTS"
+    MCP_PORTS=("${ENV_MCP_PORTS[@]}" "${MCP_PORTS[@]}")
+fi
+for port in "${MCP_PORTS[@]}"; do
+    [[ "$port" =~ ^[0-9]{1,5}$ ]] || die "MCP ports must be integers from 1024 to 65535"
+    ((10#$port >= 1024 && 10#$port <= 65535)) || die "MCP ports must be integers from 1024 to 65535"
 done
 
 # ---------------------------------------------------------------------
@@ -319,6 +350,7 @@ for setting in MEMORY_MIB CPUS BOOT_TIMEOUT BATCH_TIMEOUT IDLE_TIMEOUT CACHE_DIR
     [[ -z "$value" ]] || qargv+=("--${option//_/-}" "$value")
 done
 [[ "${SANDBOX_QEMU_KEEP_ARTIFACTS:-0}" != "1" ]] || qargv+=(--keep-artifacts)
+for port in "${MCP_PORTS[@]}"; do qargv+=(--mcp-port "$port"); done
 for m in ${MOUNTS[@]+"${MOUNTS[@]}"}; do
     qargv+=(--mount "$ROOT/${m%%:*}:${m#*:}")
 done

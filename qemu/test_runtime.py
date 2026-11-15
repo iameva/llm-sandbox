@@ -5,6 +5,7 @@ import contextlib
 import io
 import os
 from pathlib import Path
+import shlex
 import socket
 import struct
 import subprocess
@@ -328,12 +329,30 @@ class RuntimeTests(unittest.TestCase):
                     commands.append(argv)
                     if argv[0].endswith('qemu-img'):
                         Path(argv[-1]).write_bytes(b'private overlay')
+                    elif argv[0].endswith('genisoimage'):
+                        seed = Path(kwargs['cwd'])
+                        config = (seed/'session.json').read_text()
+                        self.assertEqual(json.loads(config)['mcp_ports'], [8765])
+                        self.assertNotIn('host-only-mcp-key', config)
+                        self.assertNotIn('CUSTOM_MCP_API_KEY', config)
+                        self.assertNotIn('mcp.guard', config)
+                        self.assertIn('network_relay.py', argv)
+                        self.assertTrue((seed/'network_relay.py').is_file())
                 def popen(argv, **kwargs):
                     commands.append(argv)
                     child = Child()
                     if '--socket-path' in argv:
                         Path(argv[argv.index('--socket-path')+1]).touch()
                     else:
+                        network = argv[argv.index('-netdev')+1]
+                        self.assertIn('restrict=on,ipv6=off', network)
+                        self.assertEqual(network.count('guestfwd='), 2)
+                        self.assertIn('guestfwd=tcp:10.0.2.101:8765-cmd:', network)
+                        forward = next(part for part in network.split(',') if '10.0.2.101:' in part)
+                        relay_args = shlex.split(forward.split('-cmd:', 1)[1])
+                        guard_path = Path(relay_args[relay_args.index('--guard')+1])
+                        self.assertTrue(guard_path.is_socket())
+                        self.assertFalse(guard_path.is_relative_to(workspace))
                         overlay = Path(argv[argv.index('-drive')+1].split('file=', 1)[1].split(',')[0])
                         self.assertNotEqual(overlay, disk)
                         self.assertTrue(overlay.is_file())
@@ -343,7 +362,9 @@ class RuntimeTests(unittest.TestCase):
                     return child
                 stderr = io.StringIO()
                 with patch.object(sys, 'argv', ['sandbox', '--disk', str(disk), '--workspace', str(workspace),
-                                              '--allow-file', str(allow), '--cache-dir', str(cache), '--batch']), \
+                                              '--allow-file', str(allow), '--cache-dir', str(cache), '--batch',
+                                              '--mcp-port', '8765', '--mcp-port', '8765']), \
+                     patch.dict(os.environ, {'CUSTOM_MCP_API_KEY': 'host-only-mcp-key'}), \
                      patch.object(sandbox, 'disk_cache', side_effect=lambda path: path), \
                      patch.object(sandbox.shutil, 'which', side_effect=lambda name: '/fake/'+name), \
                      patch.object(sandbox.os, 'access', return_value=True), \
@@ -355,6 +376,11 @@ class RuntimeTests(unittest.TestCase):
                     result = sandbox.main()
                 self.assertEqual(result, 0 if guest_succeeds else 2)
                 self.assertEqual(disk.read_bytes(), b'unchanged base')
+                vm_command = next(argv for argv in commands if '-netdev' in argv)
+                network = vm_command[vm_command.index('-netdev')+1]
+                forward = next(part for part in network.split(',') if '10.0.2.101:' in part)
+                relay_args = shlex.split(forward.split('-cmd:', 1)[1])
+                self.assertFalse(Path(relay_args[relay_args.index('--guard')+1]).exists())
                 creation = next(argv for argv in commands if argv[0].endswith('qemu-img'))
                 self.assertEqual(creation[1:7], ['create', '-f', 'qcow2', '-F', 'qcow2', '-b'])
                 self.assertFalse(Path(creation[-1]).exists())

@@ -1,4 +1,5 @@
 """Small acceptance checks against the actual launcher configuration."""
+import http.client
 import json
 import os
 from pathlib import Path
@@ -146,7 +147,30 @@ def omp_sqlite_checks(mounts):
     return checks
 
 
-def verify(mounts, sqlite_home, environment=None, image=False):
+def mcp_http_checks(ports):
+    """Check the full forwarding path without credentials, tool calls or redirects.
+
+    A valid HTTP response (including 401/404/405) proves transport connectivity,
+    not MCP authentication or tool availability. Ports alone specify no MCP path.
+    """
+    checks = {}
+    for port in ports:
+        connection = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+        name = f'mcp_http_transport:{port}'
+        try:
+            connection.request('HEAD', '/', headers={'Connection': 'close'})
+            response = connection.getresponse()
+            checks[name] = 100 <= response.status <= 599
+        except (OSError, http.client.HTTPException) as exc:
+            checks[name] = False
+            print(f'Host MCP port {port} unreachable over HTTP: {type(exc).__name__}; '
+                  'check the host server and --mcp-port setting', flush=True)
+        finally:
+            connection.close()
+    return checks
+
+
+def verify(mounts, sqlite_home, environment=None, image=False, mcp_ports=()):
     checks, versions = agent_versions(environment, recorded_agents()) if image else ({}, {})
     tools = {}
     # Images built before the toolchain was added have no record; the image
@@ -156,6 +180,7 @@ def verify(mounts, sqlite_home, environment=None, image=False):
         checks.update(tool_checks)
         checks['browser_smoke'] = browser_smoke(environment, Path('/workspace/browser-smoke'))
     checks.update(omp_sqlite_checks(mounts))
+    checks.update(mcp_http_checks(mcp_ports))
     checks['uid_1000'] = os.getuid() == 1000
     try:
         checks['codex_sqlite_wal'] = sqlite_wal_works(sqlite_home)
@@ -182,6 +207,7 @@ def verify(mounts, sqlite_home, environment=None, image=False):
         'checks': checks,
         'versions': versions,
         'tools': tools,
-        'limits': 'Direct TCP failures are smoke checks, not proof of complete isolation; run the host boundary suite.',
+        'limits': 'Direct TCP failures are smoke checks, not proof of complete isolation; run the host boundary suite. '
+                  'MCP checks prove HTTP transport only, not authentication or tool availability.',
     }, indent=2))
     return 0 if all(checks.values()) else 1

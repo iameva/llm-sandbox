@@ -20,10 +20,14 @@ import time
 
 try:
     from .proxy_process import Processes
+    from .network_relay import MCP_ADDRESS
+    from .relay_guard import RelayGuard
     from .runtime_support import (bounded_integer, disk_cache, private_directory,
                                   write_size, read_report, finish_artifacts, prune_artifacts, validate_base_image)
 except ImportError:
     from proxy_process import Processes
+    from network_relay import MCP_ADDRESS
+    from relay_guard import RelayGuard
     from runtime_support import (bounded_integer, disk_cache, private_directory,
                                  write_size, read_report, finish_artifacts, prune_artifacts, validate_base_image)
 
@@ -72,17 +76,29 @@ TTYVHangup=yes
 """
 
 
-def qemu_command(qemu, disk, seed, fs, port, memory_mib=2048, cpus=2):
-    relay = shlex.join([sys.executable, str(Path(__file__).with_name('network_relay.py').resolve()),
-                        '--tcp', '127.0.0.1', str(port)])
-    if ',' in relay:
-        raise ValueError('relay path must not contain commas')
+def qemu_command(qemu, disk, seed, fs, port, memory_mib=2048, cpus=2, mcp_ports=(), mcp_guard=None):
+    def forward(address, guest_port, host_port, guard=None):
+        relay = shlex.join([sys.executable, str(Path(__file__).with_name('network_relay.py').resolve()),
+                            *(['--guard', str(guard)] if guard is not None else []),
+                            '--tcp', '127.0.0.1', str(host_port)])
+        if ',' in relay:
+            raise ValueError('relay path must not contain commas')
+        return f'guestfwd=tcp:{address}:{guest_port}-cmd:{relay}'
+
+    network = ['user,id=n,net=10.0.2.0/24,restrict=on,ipv6=off',
+               forward('10.0.2.100', 3128, port)]
+    for mcp_port in dict.fromkeys(mcp_ports):
+        if type(mcp_port) is not int or not 1024 <= mcp_port <= 65535:
+            raise ValueError('MCP ports must be integers from 1024 to 65535')
+        if mcp_guard is None:
+            raise ValueError('MCP forwarding requires a host lifetime guard')
+        # The guest chooses neither a host nor a destination port on this relay.
+        network.append(forward(MCP_ADDRESS, mcp_port, mcp_port, mcp_guard))
     return [
         qemu, '-machine', 'q35,accel=kvm', '-cpu', 'host', '-m', str(memory_mib), '-smp', str(cpus),
         '-object', f'memory-backend-memfd,id=mem,size={memory_mib}M,share=on',
         '-numa', 'node,memdev=mem', '-nodefaults', '-no-user-config',
-        '-netdev', 'user,id=n,net=10.0.2.0/24,restrict=on,ipv6=off,'
-                   f'guestfwd=tcp:10.0.2.100:3128-cmd:{relay}',
+        '-netdev', ','.join(network),
         '-device', 'virtio-net-pci,netdev=n',
         '-display', 'none', '-monitor', 'none',
         # The first UART remains the kernel/system console. Only the second
@@ -209,6 +225,8 @@ def main():
                         help='seconds after guest readiness; 0 means no command deadline')
     parser.add_argument('--idle-timeout', type=bounded_integer(0, 604800), default=0,
                         help='proxy tunnel inactivity seconds; 0 keeps idle tunnels open')
+    parser.add_argument('--mcp-port', type=bounded_integer(1024, 65535), action='append', default=[],
+                        help='opt in to host 127.0.0.1:PORT at guest 127.0.0.1:PORT (repeatable)')
     parser.add_argument('--cache-dir', type=Path,
                         default=Path(os.environ.get('XDG_CACHE_HOME', str(Path.home()/'.cache')))/'llm-sandbox/qemu')
     parser.add_argument('--keep-artifacts', action='store_true', help='retain bounded diagnostics, never the disposable disk')
@@ -220,6 +238,7 @@ def main():
         cache = disk_cache(args.cache_dir)
         settings = launch_settings(args.mount, args.asset, args.env, args.command, args.verify)
         settings['verify_image'] = args.verify_image
+        settings['mcp_ports'] = list(dict.fromkeys(args.mcp_port))
         disk = args.disk.resolve(strict=True)
         workspace = args.workspace.resolve(strict=True)
         allow = args.allow_file.resolve(strict=True)
@@ -282,6 +301,7 @@ def main():
     helpers = []
     logs = []
     proxies = None
+    mcp_guard = None
     vm_lock = None
     omp_locks = {}
     success = False
@@ -330,6 +350,8 @@ def main():
         proxies = Processes(base, allow_file=allow, idle_timeout=args.idle_timeout)
         proxies.start('sandbox')
         helpers.append(('HTTPS proxy', proxies.children['sandbox']))
+        if settings['mcp_ports']:
+            mcp_guard = RelayGuard(sockets/'mcp.guard')
         source = base/'seed'
         source.mkdir(mode=0o700)
         files = {
@@ -343,11 +365,12 @@ def main():
             (source/name).write_text(content)
         shutil.copyfile(Path(__file__).with_name('sandbox_guest.py'), source/'session.py')
         shutil.copyfile(Path(__file__).with_name('guest_verify.py'), source/'guest_verify.py')
+        shutil.copyfile(Path(__file__).with_name('network_relay.py'), source/'network_relay.py')
         for asset in settings['assets']:
             shutil.copyfile(asset['source'], source/asset['seed'])
         seed = base/'seed.iso'
         subprocess.run([maker, '-quiet', '-output', str(seed), '-volid', 'cidata',
-                        '-joliet', '-rock', *files, 'session.py', 'guest_verify.py',
+                        '-joliet', '-rock', *files, 'session.py', 'guest_verify.py', 'network_relay.py',
                         *[a['seed'] for a in settings['assets']]], cwd=source, check=True, timeout=60)
         fs = sockets/'vhost.sock'
         log = (base/'virtiofsd.log').open('w')
@@ -364,7 +387,8 @@ def main():
             if daemon.poll() is not None or time.monotonic() > deadline:
                 raise RuntimeError('virtiofsd failed to start; inspect its log')
             time.sleep(.1)
-        command = qemu_command(qemu, disk, seed, fs, proxies.ports['sandbox'], args.memory_mib, args.cpus)
+        command = qemu_command(qemu, disk, seed, fs, proxies.ports['sandbox'], args.memory_mib, args.cpus,
+                               settings['mcp_ports'], mcp_guard.path if mcp_guard else None)
         report_dir = base/'report'
         report_dir.mkdir(mode=0o700)
         exports = [(Path(m['source']), f'state{i}') for i, m in enumerate(settings['mounts'])]
@@ -417,6 +441,8 @@ def main():
             if not (report_dir/'ready').exists() and time.monotonic() > boot_deadline:
                 raise TimeoutError(f'guest did not start within {args.boot_timeout} seconds; inspect machine.log and console.log')
             check_helpers(vm, helpers)
+            if mcp_guard is not None:
+                mcp_guard.check()
             time.sleep(.2)
         if vm.returncode:
             return vm.returncode
@@ -437,6 +463,10 @@ def main():
         print(f'\nSandbox stopped: {exc}', file=sys.stderr)
         return 2
     finally:
+        # Cancel MCP relays even when the external server leaves streams open.
+        # This also closes automatically on abrupt launcher death (Unix socket EOF).
+        if mcp_guard is not None:
+            mcp_guard.close()
         if previous_winch is not None:
             signal.signal(signal.SIGWINCH, previous_winch)
         for child in reversed(children):

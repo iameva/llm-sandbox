@@ -45,7 +45,7 @@ install -m 0644 egress-allowlist.txt "$ALLOW"
 
 # Keep the QEMU runtime beside its dependencies; no VMs or images are built.
 mkdir -p "$CONF/qemu"
-for file in sandbox.py sandbox_guest.py network_relay.py proxy_process.py guest_verify.py runtime_support.py images.py \
+for file in sandbox.py sandbox_guest.py network_relay.py relay_guard.py proxy_process.py guest_verify.py runtime_support.py images.py \
         build_image.py build_support.py provision_agents.py browser-smoke.mjs fontconfig-symbols.conf; do
     install -m 0644 "qemu/$file" "$CONF/qemu/$file"
 done

@@ -154,13 +154,13 @@ This combination requires a separately configured gateway that exposes the Anthr
 }
 ```
 
-Then run `,claude-sandbox.sh --backend gpt-gateway --resume`. The credential is the gateway credential, which need not be your OpenAI API key. The gateway must be a public HTTPS host on the egress allowlist. The proxy refuses private and loopback destinations, so a gateway running on the host is not reachable from the VM. A ChatGPT login is not a substitute for this gateway configuration.
+Then run `,claude-sandbox.sh --backend gpt-gateway --resume`. The credential is the gateway credential, which need not be your OpenAI API key. The gateway must be a public HTTPS host on the egress allowlist. The proxy refuses private and loopback destinations, so a gateway running on the host is not reachable through that proxy. A ChatGPT login is not a substitute for this gateway configuration.
 
 The direct DeepSeek adapters use its [Anthropic-compatible endpoint](https://api-docs.deepseek.com/guides/anthropic_api/) for Claude Code and its [Responses endpoint](https://api-docs.deepseek.com/guides/responses_api/) for Codex. Pi and OMP use the native DeepSeek provider built into each harness. A profile that redirects the endpoint to a gateway loads a temporary provider registration from a read-only mounted extension, so no model configuration files or session paths are replaced. DeepSeek's [OMP integration guide](https://api-docs.deepseek.com/quick_start/agent_integrations/oh_my_pi/) describes the tool-call compatibility fields used for redirected endpoints. Registered custom models currently use zero cost metadata, so harness cost estimates are not a billing estimate. Check the provider's usage dashboard for actual charges.
 
 ## Network policy
 
-Each launch starts its own egress proxy in enforce mode. The VM has QEMU user networking with `restrict=on`: its only route out is that proxy, which accepts HTTPS `CONNECT` to hosts on the allowlist and refuses everything else, including private destinations. `SANDBOX_ALLOW_FILE` selects the allowlist; the default is the installed `~/.config/llm-sandbox/egress-allowlist.txt`. Restart a run to load allowlist changes. The proxy never intercepts TLS.
+Each launch starts its own egress proxy in enforce mode. The VM has QEMU user networking with `restrict=on`: by default its only route out is that proxy, which accepts HTTPS `CONNECT` to hosts on the allowlist and refuses everything else, including private destinations. Explicit host MCP forwards, described below, are the only optional exception. `SANDBOX_ALLOW_FILE` selects the allowlist; the default is the installed `~/.config/llm-sandbox/egress-allowlist.txt`. Restart a run to load allowlist changes. The proxy never intercepts TLS.
 
 Each run records proxy decisions in `sandbox.process-decisions.jsonl` in its run directory. Keep it with `SANDBOX_QEMU_KEEP_ARTIFACTS=1`, then draft a candidate allowlist from it:
 
@@ -169,6 +169,45 @@ Each run records proxy decisions in `sandbox.process-decisions.jsonl` in its run
 ```
 
 Only events recorded after a successful upstream connection become active entries. Review the result before replacing the repository copy.
+
+### Host-side MCP servers
+
+Run an MCP server on the **host** to let agents use its tools without giving the VM its upstream API keys:
+
+1. Reinstall with `sh install.sh`; no image rebuild is needed.
+2. Start your server separately, using its documented Streamable HTTP transport, bound to IPv4 `127.0.0.1`, for example port `8000` with endpoint `/mcp`. Keep its API keys in host environment variables or files **outside the workspace and all shared agent-state directories**. A stdio-only server needs a host-side HTTP bridge; this launcher does not start or manage MCP servers.
+3. Opt in with `--mcp-port 8000` before harness-specific arguments. Inside the VM the same server is reachable at `http://127.0.0.1:8000/mcp`. Configure that URL in the agent's MCP settings, without the upstream API key.
+
+For Pi, register the server once in its persistent sandbox state, then launch normally:
+
+```sh
+,pi-sandbox.sh --mcp-port 8000 --shell -c \
+  'pi mcp add host_tools --url http://127.0.0.1:8000/mcp && pi mcp list'
+,pi-sandbox.sh --mcp-port 8000
+```
+
+For Codex, add this to the host file `~/.config/llm-sandbox/codex/config.toml`, then launch with `,codex-sandbox.sh --mcp-port 8000`:
+
+```toml
+[mcp_servers.host_tools]
+url = "http://127.0.0.1:8000/mcp"
+```
+
+Other harnesses use their own HTTP MCP configuration with the same URL. Use your server's actual endpoint path. Repeat `--mcp-port` for multiple servers, or set `SANDBOX_MCP_PORTS=8000,8001`; the environment list and flags are combined. Ports must be between 1024 and 65535. Without either setting, no host MCP port is exposed. Saved client settings alone do not open a forward. Use `--no-host-mcp` before harness arguments to ignore `SANDBOX_MCP_PORTS` for a run (even if that variable is malformed). It cannot be combined with explicit `--mcp-port` flags. Pi's native `--no-mcp` disables its MCP client, not the VM's network forwards.
+
+Each selected guest loopback port relays through a fixed QEMU `guestfwd` at `10.0.2.101:PORT` to **host `127.0.0.1:PORT` only**. There is no arbitrary host/address selection and no new host TCP listener. The guest loopback listener preserves localhost HTTP Host/Origin headers and works with the existing `NO_PROXY` settings; no DNS-rebinding protection needs to be disabled. General host/private-network access remains blocked. Guest listeners disappear with the VM; the host server keeps running. Multiple VMs can opt into the same server, so it must support independent client sessions.
+
+A private, host-only Unix socket gives each MCP relay a lifetime lease. VM cleanup or launcher death closes those leases, cancelling idle relays without stopping the MCP server. The host admits at most **64 simultaneous MCP connections per VM**, across all selected ports; excess connections close without reaching the server. The guest loopback listener also caps handlers at 64 per port and closes active streams on shutdown. These limits do not bound QEMU's transient per-connection process creation rate; they are not complete host resource isolation. Established streams have no idle deadline, and TCP half-closes preserve traffic in the remaining direction.
+
+To check connectivity through the whole forwarding path:
+
+```sh
+,pi-sandbox.sh --mcp-port 8000 --check
+```
+
+The check sends an unauthenticated, plain-HTTP `HEAD /` to each selected port and requires a valid HTTP response. Responses such as 401, 404 and 405 count as reachable; it does not follow redirects, invoke tools, or verify MCP authentication. Use the client's own MCP listing command to check its actual endpoint and credentials, or a TLS-only endpoint. A missing host server fails the transport check; ordinary runs can reconnect after you start or restart it. Host relay errors identify the destination port.
+
+**This grants a capability, not just a network connection.** Every guest process can use the entire selected TCP listener, not only `/mcp`. Use a dedicated, least-privileged MCP server: avoid admin routes, arbitrary host shell/file access, unrestricted URL fetching or tools that reveal credentials. Enforce tool permissions, quotas and auditing on the host server; these forwards bypass the egress allowlist, proxy decision log and proxy idle timeout. If the MCP endpoint requires client authentication, give the VM a separate scoped MCP token, not the upstream API key. Keeping keys outside the VM does not prevent misuse through an overpowered tool or a vulnerable server.
 
 ## Verification
 
@@ -188,7 +227,7 @@ SANDBOX_NATIVE_TESTS=1 python3 -B -m unittest discover -s tests -p test_native_a
 
 `./test-argv.sh` runs the launcher subset: ordered arguments, installed entry points, fresh configuration, backend selection, shared session paths, legacy imports, credential handling and error propagation.
 
-On the host, run each agent's `--check`. It boots that agent's configuration and checks identity, state access, SQLite WAL access, proxy denial and direct TCP failures. It is a smoke check, not a certification of isolation.
+On the host, run each agent's `--check`. It boots that agent's configuration and checks identity, state access, SQLite WAL access, proxy denial, direct TCP failures and HTTP transport for any selected MCP ports. It is a smoke check, not a certification of isolation.
 
 ```sh
 ,codex-sandbox.sh --check
@@ -197,6 +236,14 @@ On the host, run each agent's `--check`. It boots that agent's configuration and
 ```
 
 Inspect the browser screenshots for missing glyphs: only the fullwidth plus should draw as a box.
+
+For full MCP forwarding acceptance, run on the **host** from this repository:
+
+```sh
+python3 prototypes/qemu/accept_mcp.py --disk "$(,sandbox-image path)"
+```
+
+It uses one disposable 2-GiB VM, a temporary installed launcher/home/workspace, dummy credentials and local HTTP fixtures only. It checks initialization, a harmless tool call, incremental SSE delivery, server restart/reconnect, blocked unforwarded ports, and relay cleanup while a stream is still open. It verifies that the host-only credential canary is absent from guest environment/files and leaves bounded diagnostics under `~/.cache/llm-sandbox/qemu-acceptance`. If cleanup cannot stop a run-owned process, its temporary disks and exports are preserved for recovery. This acceptance requires QEMU/KVM and a verified agent image; local unit tests do not replace it.
 
 `legacy/` holds the plans and host probes from the retired Podman workflow; they record history, not current guarantees.
 
@@ -301,6 +348,7 @@ Reinstall with `sh install.sh` after runtime changes. No image rebuild is needed
 | `SANDBOX_QEMU_IDLE_TIMEOUT` | `0` | Established proxy tunnel inactivity seconds; zero keeps idle tunnels open |
 | `SANDBOX_QEMU_CACHE_DIR` | `$XDG_CACHE_HOME/llm-sandbox/qemu` | Private disk-backed storage; defaults to `~/.cache/llm-sandbox/qemu` when XDG_CACHE_HOME is unset |
 | `SANDBOX_QEMU_KEEP_ARTIFACTS` | `0` | Set to 1 to retain diagnostics after successful runs |
+| `SANDBOX_MCP_PORTS` | Empty | Comma-separated host loopback MCP ports (1024–65535); combined with repeatable `--mcp-port PORT`; ignored by `--no-host-mcp` |
 
 Timeout settings accept up to 604800 seconds; the boot timeout must be positive.
 Verification commands default to a 900-second command deadline. The memory

@@ -1,4 +1,5 @@
 """Guest console entry point; mounts only the host-selected exports."""
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,11 @@ import struct
 import termios
 import time
 import traceback
+
+try:
+    from .network_relay import MCP_ADDRESS, loopback_forward
+except ImportError:
+    from network_relay import MCP_ADDRESS, loopback_forward
 
 
 def apply_terminal_size(fd=0, report=Path('/mnt/report/terminal.json')):
@@ -95,29 +101,35 @@ def session():
         'PS1': '[qemu sandbox] \\w \\$ ',
     }
     environment.setdefault('CLAUDE_CONFIG_DIR', f'{user.pw_dir}/.claude')
-    apply_terminal_size()
-    Path('/mnt/report/ready').write_text('ready')
-    print('\nQEMU sandbox ready. /workspace is your writable host directory.\n'
-          'Network access requires the allowlisted HTTPS proxy. Exit powers off the VM.\n',
-          flush=True)
-    if config.get('verify'):
-        from guest_verify import verify
-        return verify(mounts, sqlite_home, environment, config.get('verify_image', False))
-    from guest_verify import omp_sqlite_checks
-    if not all(omp_sqlite_checks(mounts).values()):
-        raise RuntimeError('OMP shared state does not support SQLite WAL mapping; '
-                           'update the host launcher and virtiofsd, then run ,omp-sandbox.sh --check')
-    command = config.get('command')
-    if not command:
-        command = ['bash', '--noprofile', '--norc', '-i'] if config['agent'] == 'shell' else [config['agent']]
-    if command[0] == 'zsh' and not shutil.which('zsh', path=environment['PATH']):
-        # Images built before zsh was added; keeps rollback usable.
-        command = ['bash', *command[1:]]
-    child = subprocess.Popen(command, env=environment)
-    while child.poll() is None:
-        time.sleep(1)
+    with ExitStack() as forwards:
+        for port in config.get('mcp_ports', []):
+            forwards.enter_context(loopback_forward(port, (MCP_ADDRESS, port)))
         apply_terminal_size()
-    return child.returncode
+        Path('/mnt/report/ready').write_text('ready')
+        print('\nQEMU sandbox ready. /workspace is your writable host directory.\n'
+              'Network access uses the allowlisted HTTPS proxy and any opted-in host MCP ports. '
+              'Exit powers off the VM.\n', flush=True)
+        if config.get('mcp_ports'):
+            print('Host MCP forwards: '+', '.join(f'127.0.0.1:{p}' for p in config['mcp_ports']), flush=True)
+        if config.get('verify'):
+            from guest_verify import verify
+            return verify(mounts, sqlite_home, environment, config.get('verify_image', False),
+                          mcp_ports=config.get('mcp_ports', []))
+        from guest_verify import omp_sqlite_checks
+        if not all(omp_sqlite_checks(mounts).values()):
+            raise RuntimeError('OMP shared state does not support SQLite WAL mapping; '
+                               'update the host launcher and virtiofsd, then run ,omp-sandbox.sh --check')
+        command = config.get('command')
+        if not command:
+            command = ['bash', '--noprofile', '--norc', '-i'] if config['agent'] == 'shell' else [config['agent']]
+        if command[0] == 'zsh' and not shutil.which('zsh', path=environment['PATH']):
+            # Images built before zsh was added; keeps rollback usable.
+            command = ['bash', *command[1:]]
+        child = subprocess.Popen(command, env=environment)
+        while child.poll() is None:
+            time.sleep(1)
+            apply_terminal_size()
+        return child.returncode
 
 
 def main():
